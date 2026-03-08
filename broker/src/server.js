@@ -107,7 +107,12 @@ function serveStatic(req, res) {
         ? "application/javascript; charset=utf-8"
         : "text/plain; charset=utf-8";
 
-  res.writeHead(200, { "content-type": contentType });
+  res.writeHead(200, {
+    "content-type": contentType,
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    Pragma: "no-cache",
+    Expires: "0"
+  });
   res.end(content);
 }
 
@@ -154,6 +159,14 @@ server.on("upgrade", (req, socket, head) => {
 function broadcastToClients(payload) {
   for (const client of clients.values()) {
     sendJson(client.ws, payload);
+  }
+}
+
+function broadcastAudioToClients(payload) {
+  for (const client of clients.values()) {
+    if (client.ws.readyState === client.ws.OPEN) {
+      client.ws.send(JSON.stringify(payload));
+    }
   }
 }
 
@@ -223,6 +236,14 @@ deviceWss.on("connection", (ws, req) => {
         ...message,
         deviceId,
         remoteVideoUrl: `/video/${encodeURIComponent(deviceId)}`
+      });
+      return;
+    }
+
+    if (message.type === "audio") {
+      broadcastAudioToClients({
+        ...message,
+        deviceId
       });
       return;
     }

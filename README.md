@@ -11,6 +11,13 @@ This repository currently contains:
 - `firmware/phase1_esp32/`: Arduino-based ESP32 firmware for Wi-Fi + broker connection
 - `WORKLOG.md`: cumulative execution log and confirmed results
 
+Current prototype features:
+
+- remote control through the Oracle VM broker
+- local and remote MJPEG video
+- browser-side audio playback path for low-bitrate mu-law chunks
+- ESP32 firmware scaffolding for built-in microphone uplink
+
 ## Phase 1 Success Criteria
 
 - ESP32 connects to Wi-Fi

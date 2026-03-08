@@ -387,3 +387,101 @@ Until the runtime log is observed, these two points remain unverified:
 If work resumes later, continue from:
 
 - implement remote video proxy via Oracle VM
+
+### Audio Prototype (In Progress)
+
+Goal:
+
+- Add low-bitrate microphone uplink using the XIAO ESP32S3 Sense built-in microphone
+- Keep audio separate from video
+- Prevent delay from growing over time by bounding the browser playback buffer
+
+Completed locally:
+
+- Confirmed the Arduino ESP32 core exposes `ESP_I2S` with `I2S_MODE_PDM_RX`
+- Chosen built-in mic path:
+  - PDM clock: `GPIO42`
+  - PDM data: `GPIO41`
+- Implemented broker forwarding for device `audio` messages
+- Implemented browser audio playback path:
+  - `AudioContext`
+  - mu-law decode
+  - bounded scheduling
+  - resync/drop behavior when the queued audio gets too far ahead
+- Implemented firmware-side audio scaffolding:
+  - built-in mic initialization through `ESP_I2S`
+  - 16kHz capture
+  - downsample to 8kHz
+  - mu-law encode
+  - base64 wrap into JSON `audio` messages
+
+Intended audio stream characteristics:
+
+- codec: `mu-law`
+- effective payload: `160 bytes / 20ms`
+- approximate raw stream rate: `8KB/s`
+- browser drops or resyncs late audio rather than letting delay accumulate
+
+Current blocker:
+
+- Rebuilding the updated firmware from the coding environment is currently blocked by Arduino CLI access/permission issues around the installed core path
+- The source changes are present in the repository, but the audio firmware has not yet been re-flashed and verified on hardware from this session
+
+Update:
+
+- Worked around Arduino CLI issues by manually:
+  - recompiling the sketch object with the cached Xtensa toolchain
+  - relinking the ELF with the existing build artifacts
+  - regenerating the firmware image through `esptool`
+  - flashing the updated firmware to `COM3`
+
+Flash result:
+
+- bootloader / partitions / app all written successfully
+- board reset completed after flashing
+
+Next actions:
+
+1. Deploy updated broker and web files to the Oracle VM
+2. Rebuild/flash the updated firmware through a working Arduino compile path
+3. Verify:
+   - built-in microphone startup
+   - browser audio playback
+   - no runaway audio delay
+
+### Audio Noise Mitigation
+
+Observed issue:
+
+- Voice was audible, but periodic noise kept riding on top of the signal.
+
+Mitigation applied:
+
+- Stopped dumping every `audio` packet to the browser log in `web/index.html`
+- Added a simple first-order high-pass filter in firmware to reduce DC/low-frequency rumble
+- Added a small noise gate so very low-level background hiss is zeroed before mu-law encoding
+- Reduced filtered sample gain before mu-law encode to avoid harsh clipping artifacts
+
+Deployment:
+
+- Recompiled the sketch object against the cached ESP32 toolchain
+- Relinked the ELF manually
+- Regenerated the BIN with elevated `esptool`
+- Reflashed the board on `COM3`
+
+Expectation after this update:
+
+- less periodic hum/click noise
+- cleaner idle background
+- lower chance of browser-side crackle from log flooding
+
+### Audio Stability Follow-up
+
+- Added browser-side client heartbeat so the broker no longer closes idle client WebSockets during audio monitoring.
+- Added no-cache headers for static files so the console refreshes to the latest JavaScript instead of serving a stale cached page.
+- Increased audio chunk size from `20ms` to `40ms`:
+  - capture: `640 @ 16kHz`
+  - stream: `320 @ 8kHz`
+- Goal: reduce WebSocket/message overhead and browser scheduling jitter that can show up as periodic crackle.
+- Rebuilt the sketch object, relinked the ELF, regenerated the BIN, and reflashed `COM3`.
+- Updated `broker/src/server.js` and `web/index.html` were also redeployed to the Oracle VM.

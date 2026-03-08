@@ -128,6 +128,16 @@
           <img id="videoFrame" alt="RC car video" style="width: 100%; min-height: 240px; background: #ece8dd; border-radius: 12px; border: 1px solid var(--border); object-fit: contain;" />
         </div>
       </div>
+
+      <div class="panel">
+        <div class="row">
+          <button id="startAudioBtn">Start Audio</button>
+          <button id="stopAudioBtn" class="stop">Stop Audio</button>
+        </div>
+        <div style="margin-top: 12px">
+          <strong id="audioStatus">audio idle</strong>
+        </div>
+      </div>
     </main>
 
     <script>
@@ -138,16 +148,30 @@
       const logEl = document.getElementById("log");
       const videoUrlInput = document.getElementById("videoUrl");
       const videoFrame = document.getElementById("videoFrame");
+      const audioStatusEl = document.getElementById("audioStatus");
 
       const defaultProtocol = location.protocol === "https:" ? "wss" : "ws";
       const defaultHost = location.host || "localhost:8080";
       brokerInput.value = `${defaultProtocol}://${defaultHost}/client`;
 
       let ws = null;
+      let clientPingTimer = null;
+      const audioState = {
+        ctx: null,
+        enabled: false,
+        nextPlayAt: 0,
+        maxLeadSeconds: 0.24,
+        targetLeadSeconds: 0.05,
+        lastSeqByDevice: new Map()
+      };
 
       function log(line) {
         logEl.textContent += `${new Date().toISOString()} ${line}\n`;
         logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setAudioStatus(text) {
+        audioStatusEl.textContent = text;
       }
 
       function loadVideo(url) {
@@ -161,21 +185,118 @@
 
       function send(payload) {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
-          log("socket not connected");
           return;
         }
         ws.send(JSON.stringify(payload));
       }
 
+      function startClientPing() {
+        stopClientPing();
+        clientPingTimer = setInterval(() => {
+          send({ type: "ping" });
+        }, 10000);
+      }
+
+      function stopClientPing() {
+        if (clientPingTimer) {
+          clearInterval(clientPingTimer);
+          clientPingTimer = null;
+        }
+      }
+
+      async function ensureAudioContext() {
+        if (!audioState.ctx) {
+          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+          audioState.ctx = new AudioContextCtor({ sampleRate: 8000 });
+        }
+        if (audioState.ctx.state !== "running") {
+          await audioState.ctx.resume();
+        }
+      }
+
+      function decodeMulawByte(value) {
+        const mu = (~value) & 0xff;
+        const sign = mu & 0x80;
+        const exponent = (mu >> 4) & 0x07;
+        const mantissa = mu & 0x0f;
+        let sample = ((mantissa << 3) + 0x84) << exponent;
+        sample = sign ? 0x84 - sample : sample - 0x84;
+        return sample / 32768;
+      }
+
+      function decodeBase64ToBytes(encoded) {
+        const raw = atob(encoded);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i += 1) {
+          bytes[i] = raw.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      function playAudioChunk(message) {
+        if (!audioState.enabled || !audioState.ctx || !message.payload) {
+          return;
+        }
+
+        const currentDeviceId = deviceIdInput.value || "rc-car-01";
+        if (message.deviceId && message.deviceId !== currentDeviceId) {
+          return;
+        }
+
+        const seq = Number(message.seq || 0);
+        const lastSeq = audioState.lastSeqByDevice.get(message.deviceId || currentDeviceId);
+        if (Number.isFinite(lastSeq) && seq > lastSeq + 1) {
+          log(`audio gap: ${seq - lastSeq - 1} chunk(s) dropped`);
+        }
+        audioState.lastSeqByDevice.set(message.deviceId || currentDeviceId, seq);
+
+        const bytes = decodeBase64ToBytes(message.payload);
+        const sampleRate = Number(message.sampleRate || 8000);
+        const ctx = audioState.ctx;
+        const buffer = ctx.createBuffer(1, bytes.length, sampleRate);
+        const channel = buffer.getChannelData(0);
+
+        for (let i = 0; i < bytes.length; i += 1) {
+          channel[i] = decodeMulawByte(bytes[i]);
+        }
+
+        const now = ctx.currentTime;
+        if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04) {
+          audioState.nextPlayAt = now + audioState.targetLeadSeconds;
+        }
+
+        const queuedAhead = audioState.nextPlayAt - now;
+        if (queuedAhead > audioState.maxLeadSeconds) {
+          audioState.nextPlayAt = now + audioState.targetLeadSeconds;
+          setAudioStatus(`audio resync ${queuedAhead.toFixed(3)}s`);
+          return;
+        }
+
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(audioState.nextPlayAt);
+        audioState.nextPlayAt += buffer.duration;
+        setAudioStatus(`audio live ${queuedAhead.toFixed(3)}s queued`);
+      }
+
       document.getElementById("connectBtn").addEventListener("click", () => {
         ws = new WebSocket(brokerInput.value);
-        ws.onopen = () => log("client socket connected");
-        ws.onclose = () => log("client socket closed");
+        ws.onopen = () => {
+          log("client socket connected");
+          startClientPing();
+        };
+        ws.onclose = () => {
+          stopClientPing();
+          log("client socket closed");
+        };
         ws.onerror = () => log("client socket error");
         ws.onmessage = (event) => {
-          log(`recv ${event.data}`);
           try {
             const message = JSON.parse(event.data);
+            if (message.type !== "audio") {
+              log(`recv ${event.data}`);
+            }
             if (message.type === "status" && message.localIp && message.cameraReady) {
               const candidate = `http://${message.localIp}${message.streamPath || "/stream"}`;
               if (!videoUrlInput.value) {
@@ -188,12 +309,16 @@
                 videoUrlInput.value = remoteCandidate;
               }
             }
+            if (message.type === "audio") {
+              playAudioChunk(message);
+            }
           } catch {}
         };
       });
 
       document.getElementById("disconnectBtn").addEventListener("click", () => {
         if (ws) {
+          stopClientPing();
           ws.close();
         }
       });
@@ -225,6 +350,29 @@
       document.getElementById("clearVideoBtn").addEventListener("click", () => {
         videoFrame.removeAttribute("src");
         log("video cleared");
+      });
+
+      document.getElementById("startAudioBtn").addEventListener("click", async () => {
+        try {
+          await ensureAudioContext();
+          audioState.enabled = true;
+          audioState.nextPlayAt = 0;
+          setAudioStatus("audio armed");
+          log("audio enabled");
+        } catch (error) {
+          setAudioStatus("audio error");
+          log(`audio init failed: ${error.message}`);
+        }
+      });
+
+      document.getElementById("stopAudioBtn").addEventListener("click", async () => {
+        audioState.enabled = false;
+        audioState.nextPlayAt = 0;
+        if (audioState.ctx && audioState.ctx.state === "running") {
+          await audioState.ctx.suspend();
+        }
+        setAudioStatus("audio stopped");
+        log("audio disabled");
       });
     </script>
   </body>
