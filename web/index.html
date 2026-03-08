@@ -229,6 +229,23 @@
         return sample / 32768;
       }
 
+      const IMA_INDEX_TABLE = [
+        -1, -1, -1, -1, 2, 4, 6, 8,
+        -1, -1, -1, -1, 2, 4, 6, 8
+      ];
+
+      const IMA_STEP_TABLE = [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+        19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+        50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+        130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+        337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+        2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+        5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+        15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+      ];
+
       function decodeBase64ToBytes(encoded) {
         const raw = atob(encoded);
         const bytes = new Uint8Array(raw.length);
@@ -236,6 +253,44 @@
           bytes[i] = raw.charCodeAt(i);
         }
         return bytes;
+      }
+
+      function decodeAdpcmChunk(bytes, sampleCount) {
+        if (!bytes.length || bytes.length < 4 || sampleCount <= 0) {
+          return new Float32Array(0);
+        }
+
+        let predictor = (bytes[1] << 8) | bytes[0];
+        if (predictor & 0x8000) {
+          predictor -= 0x10000;
+        }
+        let stepIndex = Math.max(0, Math.min(88, bytes[2] || 0));
+        const output = new Float32Array(sampleCount);
+        output[0] = predictor / 32768;
+
+        let outIndex = 1;
+        for (let i = 4; i < bytes.length && outIndex < sampleCount; i += 1) {
+          const packed = bytes[i];
+          for (const nibble of [packed & 0x0f, (packed >> 4) & 0x0f]) {
+            let step = IMA_STEP_TABLE[stepIndex];
+            let diff = step >> 3;
+            if (nibble & 1) diff += step >> 2;
+            if (nibble & 2) diff += step >> 1;
+            if (nibble & 4) diff += step;
+
+            predictor += (nibble & 8) ? -diff : diff;
+            predictor = Math.max(-32768, Math.min(32767, predictor));
+            stepIndex += IMA_INDEX_TABLE[nibble];
+            stepIndex = Math.max(0, Math.min(88, stepIndex));
+
+            output[outIndex++] = predictor / 32768;
+            if (outIndex >= sampleCount) {
+              break;
+            }
+          }
+        }
+
+        return output;
       }
 
       function playAudioChunk(message) {
@@ -258,12 +313,23 @@
         const bytes = decodeBase64ToBytes(message.payload);
         const sampleRate = Number(message.sampleRate || 8000);
         const ctx = audioState.ctx;
-        const buffer = ctx.createBuffer(1, bytes.length, sampleRate);
-        const channel = buffer.getChannelData(0);
-
-        for (let i = 0; i < bytes.length; i += 1) {
-          channel[i] = decodeMulawByte(bytes[i]);
+        let samples;
+        if (message.codec === "adpcm_ima") {
+          samples = decodeAdpcmChunk(bytes, Number(message.samples || 0));
+        } else {
+          samples = new Float32Array(bytes.length);
+          for (let i = 0; i < bytes.length; i += 1) {
+            samples[i] = decodeMulawByte(bytes[i]);
+          }
         }
+
+        if (!samples.length) {
+          return;
+        }
+
+        const buffer = ctx.createBuffer(1, samples.length, sampleRate);
+        const channel = buffer.getChannelData(0);
+        channel.set(samples);
 
         const now = ctx.currentTime;
         if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04) {

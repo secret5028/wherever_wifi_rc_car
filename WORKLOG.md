@@ -485,3 +485,40 @@ Expectation after this update:
 - Goal: reduce WebSocket/message overhead and browser scheduling jitter that can show up as periodic crackle.
 - Rebuilt the sketch object, relinked the ELF, regenerated the BIN, and reflashed `COM3`.
 - Updated `broker/src/server.js` and `web/index.html` were also redeployed to the Oracle VM.
+
+### ADPCM And VGA Experiment
+
+- Switched audio from `16kHz mu-law` to `16kHz IMA ADPCM`.
+- Kept codec work on the edges:
+  - ESP32 encodes
+  - browser decodes
+  - broker remains a relay
+- Increased remote camera settings to:
+  - `VGA`
+  - `jpeg_quality = 12`
+- Rebuilt the firmware, regenerated the image, and reflashed the board on `COM3`.
+
+Observed issue:
+
+- Severe crackle remained after the first ADPCM pass.
+
+Root cause and fix:
+
+- The browser ADPCM decoder was treating the chunk header predictor as a real output sample.
+- This introduced a discontinuity at every audio chunk boundary.
+- Fixed `web/index.html` so ADPCM decoding starts writing output samples only from the packed nibbles, while still using the header predictor and step index purely as decoder state.
+- Redeployed the fixed `web/index.html` to the Oracle VM.
+
+### ADPCM Block Format Correction
+
+- Voice was still largely unintelligible even after the first ADPCM rollout.
+- The next issue was the encoder/decoder pair not using the same block convention:
+  - encoder header carried the previous predictor state
+  - decoder behavior was then changed away from standard block playback
+- Corrected both sides to a consistent IMA ADPCM block:
+  - chunk header predictor = first PCM sample of the block
+  - header step index = carried encoder state
+  - encoder compresses the remaining samples
+  - browser outputs the header predictor as the first decoded sample and expands the remaining nibbles after it
+- Rebuilt the sketch object, relinked the ELF, regenerated the BIN, and reflashed the board on `COM3`.
+- Re-uploaded the updated `web/index.html` to the Oracle VM.

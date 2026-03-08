@@ -21,7 +21,7 @@ constexpr unsigned long PING_INTERVAL_MS = 10000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
-constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 200;
+constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 400;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
@@ -29,7 +29,9 @@ constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
 constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
 constexpr size_t AUDIO_STREAM_SAMPLES = 640;
 constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
-constexpr size_t AUDIO_BASE64_BUFFER_LEN = 857;
+constexpr size_t AUDIO_ADPCM_HEADER_BYTES = 4;
+constexpr size_t AUDIO_ADPCM_PAYLOAD_BYTES = AUDIO_ADPCM_HEADER_BYTES + ((AUDIO_STREAM_SAMPLES - 1 + 1) / 2);
+constexpr size_t AUDIO_BASE64_BUFFER_LEN = 433;
 
 unsigned long lastWifiAttemptAt = 0;
 unsigned long wifiConnectStartedAt = 0;
@@ -56,6 +58,8 @@ int lastSteering = 0;
 uint32_t audioSequence = 0;
 int32_t audioHighpassState = 0;
 int32_t audioHighpassLastInput = 0;
+int16_t audioAdpcmPredictor = 0;
+int8_t audioAdpcmStepIndex = 0;
 
 constexpr int CAM_PIN_PWDN = -1;
 constexpr int CAM_PIN_RESET = -1;
@@ -77,8 +81,25 @@ constexpr int MIC_PIN_CLK = 42;
 constexpr int MIC_PIN_DATA = 41;
 
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
-uint8_t audioMuLawBuffer[AUDIO_STREAM_SAMPLES] = {};
+uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
 char audioBase64Buffer[AUDIO_BASE64_BUFFER_LEN] = {};
+
+constexpr int8_t IMA_INDEX_TABLE[16] = {
+  -1, -1, -1, -1, 2, 4, 6, 8,
+  -1, -1, -1, -1, 2, 4, 6, 8
+};
+
+constexpr int16_t IMA_STEP_TABLE[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+  19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+  130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+  337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+  876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+  2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+  5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+  15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
 }
 
 void handleRoot();
@@ -104,7 +125,7 @@ void publishStatus() {
   doc["steering"] = lastSteering;
   doc["cameraReady"] = cameraReady;
   doc["audioReady"] = microphoneReady;
-  doc["audioCodec"] = "mulaw";
+  doc["audioCodec"] = "adpcm_ima";
   doc["audioSampleRate"] = AUDIO_STREAM_SAMPLE_RATE;
   doc["streamPort"] = 80;
   doc["streamPath"] = "/stream";
@@ -209,8 +230,8 @@ bool initCamera() {
   config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 20;
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 15;
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -223,8 +244,8 @@ bool initCamera() {
 
   sensor_t* sensor = esp_camera_sensor_get();
   if (sensor != nullptr) {
-    sensor->set_framesize(sensor, FRAMESIZE_QVGA);
-    sensor->set_quality(sensor, 20);
+    sensor->set_framesize(sensor, FRAMESIZE_VGA);
+    sensor->set_quality(sensor, 12);
     sensor->set_brightness(sensor, 0);
     sensor->set_saturation(sensor, 0);
     sensor->set_hmirror(sensor, 0);
@@ -337,44 +358,79 @@ void uploadVideoFrameIfNeeded() {
   }
 }
 
-uint8_t encodeMuLawSample(int16_t sample) {
-  constexpr int16_t MULAW_MAX = 0x1FFF;
-  constexpr int16_t MULAW_BIAS = 33;
-  uint8_t sign = 0;
-
-  sample >>= 2;
-  if (sample < 0) {
-    sample = -sample;
-    sign = 0x80;
-  }
-
-  if (sample > MULAW_MAX) {
-    sample = MULAW_MAX;
-  }
-  sample += MULAW_BIAS;
-
-  uint8_t exponent = 7;
-  for (int16_t mask = 0x400; exponent > 0 && (sample & mask) == 0; mask >>= 1) {
-    exponent--;
-  }
-
-  uint8_t mantissa = (sample >> (exponent + 1)) & 0x0F;
-  return static_cast<uint8_t>(~(sign | (exponent << 4) | mantissa));
-}
-
 int16_t filterAudioSample(int16_t sample) {
   int32_t input = sample;
   audioHighpassState = (995 * (audioHighpassState + input - audioHighpassLastInput)) / 1000;
   audioHighpassLastInput = input;
 
   int32_t filtered = audioHighpassState;
-  if (abs(filtered) < 220) {
+  if (abs(filtered) < 96) {
     filtered = 0;
   }
 
-  filtered /= 2;
+  filtered = (filtered * 3) / 2;
   filtered = constrain(filtered, -32768, 32767);
   return static_cast<int16_t>(filtered);
+}
+
+uint8_t encodeAdpcmNibble(int16_t sample, int16_t& predictor, int8_t& stepIndex) {
+  int step = IMA_STEP_TABLE[stepIndex];
+  int diff = sample - predictor;
+  uint8_t nibble = 0;
+
+  if (diff < 0) {
+    nibble = 8;
+    diff = -diff;
+  }
+
+  int delta = step >> 3;
+  if (diff >= step) {
+    nibble |= 4;
+    diff -= step;
+    delta += step;
+  }
+  if (diff >= (step >> 1)) {
+    nibble |= 2;
+    diff -= step >> 1;
+    delta += step >> 1;
+  }
+  if (diff >= (step >> 2)) {
+    nibble |= 1;
+    delta += step >> 2;
+  }
+
+  predictor += (nibble & 8) ? -delta : delta;
+  predictor = constrain(predictor, -32768, 32767);
+
+  stepIndex += IMA_INDEX_TABLE[nibble & 0x0F];
+  stepIndex = constrain(stepIndex, 0, 88);
+  return nibble & 0x0F;
+}
+
+size_t encodeAdpcmBlock(const int16_t* input, size_t sampleCount, uint8_t* output) {
+  if (sampleCount == 0) {
+    return 0;
+  }
+
+  int16_t predictor = input[0];
+  int8_t stepIndex = audioAdpcmStepIndex;
+  output[0] = static_cast<uint8_t>(predictor & 0xFF);
+  output[1] = static_cast<uint8_t>((predictor >> 8) & 0xFF);
+  output[2] = static_cast<uint8_t>(stepIndex);
+  output[3] = 0;
+
+  size_t outIndex = AUDIO_ADPCM_HEADER_BYTES;
+  for (size_t i = 1; i < sampleCount; i += 2) {
+    uint8_t low = encodeAdpcmNibble(input[i], predictor, stepIndex);
+    uint8_t high = 0;
+    if (i + 1 < sampleCount) {
+      high = encodeAdpcmNibble(input[i + 1], predictor, stepIndex);
+    }
+    output[outIndex++] = static_cast<uint8_t>(low | (high << 4));
+  }
+
+  audioAdpcmStepIndex = stepIndex;
+  return outIndex;
 }
 
 void uploadAudioChunkIfNeeded() {
@@ -398,11 +454,11 @@ void uploadAudioChunkIfNeeded() {
   }
 
   for (size_t i = 0; i < AUDIO_STREAM_SAMPLES; i++) {
-    int16_t filtered = filterAudioSample(audioCaptureBuffer[i]);
-    audioMuLawBuffer[i] = encodeMuLawSample(filtered);
+    audioCaptureBuffer[i] = filterAudioSample(audioCaptureBuffer[i]);
   }
 
-  int encodedLen = base64_encode_chars(reinterpret_cast<const char*>(audioMuLawBuffer), AUDIO_STREAM_SAMPLES, audioBase64Buffer);
+  size_t adpcmLen = encodeAdpcmBlock(audioCaptureBuffer, AUDIO_STREAM_SAMPLES, audioAdpcmBuffer);
+  int encodedLen = base64_encode_chars(reinterpret_cast<const char*>(audioAdpcmBuffer), adpcmLen, audioBase64Buffer);
   if (encodedLen <= 0 || encodedLen >= static_cast<int>(sizeof(audioBase64Buffer))) {
     Serial.println("[MIC] base64 encode failed");
     return;
@@ -411,7 +467,7 @@ void uploadAudioChunkIfNeeded() {
 
   StaticJsonDocument<512> doc;
   doc["type"] = "audio";
-  doc["codec"] = "mulaw";
+  doc["codec"] = "adpcm_ima";
   doc["sampleRate"] = AUDIO_STREAM_SAMPLE_RATE;
   doc["samples"] = AUDIO_STREAM_SAMPLES;
   doc["seq"] = audioSequence++;
