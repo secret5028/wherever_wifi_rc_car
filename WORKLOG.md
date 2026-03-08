@@ -531,3 +531,12 @@ Root cause and fix:
   - local ESP32 root page served by `handleRoot()`
 - Left the raw `/stream` MJPEG endpoint unmodified and treated it as a low-level feed.
 - Reflashed the board on `COM3` and confirmed the user-facing views now show the expected left/right orientation.
+
+### Session Handoff Prompt
+
+- Added `NEXT_SESSION_PROMPT.md` to summarize the current proven architecture and the next intended work.
+- The next planned step is not networking redesign.
+- The next planned step is:
+  - decide the user control UI
+  - finalize motor/servo pin assignments
+  - connect real motor output to the already working remote control path
