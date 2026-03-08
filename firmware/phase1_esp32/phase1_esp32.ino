@@ -21,7 +21,7 @@ constexpr unsigned long PING_INTERVAL_MS = 10000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
-constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 400;
+constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
@@ -230,8 +230,8 @@ bool initCamera() {
   config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 15;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.jpeg_quality = 14;
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -244,8 +244,8 @@ bool initCamera() {
 
   sensor_t* sensor = esp_camera_sensor_get();
   if (sensor != nullptr) {
-    sensor->set_framesize(sensor, FRAMESIZE_VGA);
-    sensor->set_quality(sensor, 12);
+    sensor->set_framesize(sensor, FRAMESIZE_QVGA);
+    sensor->set_quality(sensor, 14);
     sensor->set_brightness(sensor, 0);
     sensor->set_saturation(sensor, 0);
     sensor->set_hmirror(sensor, 0);
@@ -364,11 +364,11 @@ int16_t filterAudioSample(int16_t sample) {
   audioHighpassLastInput = input;
 
   int32_t filtered = audioHighpassState;
-  if (abs(filtered) < 96) {
+  if (abs(filtered) < 32) {
     filtered = 0;
   }
 
-  filtered = (filtered * 3) / 2;
+  filtered *= 8;
   filtered = constrain(filtered, -32768, 32767);
   return static_cast<int16_t>(filtered);
 }
