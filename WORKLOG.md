@@ -522,3 +522,12 @@ Root cause and fix:
   - browser outputs the header predictor as the first decoded sample and expands the remaining nibbles after it
 - Rebuilt the sketch object, relinked the ELF, regenerated the BIN, and reflashed the board on `COM3`.
 - Re-uploaded the updated `web/index.html` to the Oracle VM.
+
+### Final Camera Orientation Fix
+
+- Sensor-side horizontal mirror control on the XIAO ESP32S3 Sense remained inconsistent.
+- Finalized the practical fix by mirroring both user-facing camera views in the browser layer instead:
+  - remote console page on the Oracle VM
+  - local ESP32 root page served by `handleRoot()`
+- Left the raw `/stream` MJPEG endpoint unmodified and treated it as a low-level feed.
+- Reflashed the board on `COM3` and confirmed the user-facing views now show the expected left/right orientation.

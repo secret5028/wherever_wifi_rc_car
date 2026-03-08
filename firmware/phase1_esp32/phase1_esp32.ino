@@ -283,7 +283,7 @@ void handleRoot() {
   String html;
   html += "<!doctype html><html><head><meta charset='utf-8'><title>RC Car Camera</title>";
   html += "<meta name='viewport' content='width=device-width,initial-scale=1'></head><body>";
-  html += "<h1>RC Car Camera</h1><img src='/stream' style='width:100%;max-width:960px;height:auto;' />";
+  html += "<h1>RC Car Camera</h1><img src='/stream' style='width:100%;max-width:960px;height:auto;transform:scaleX(-1);' />";
   html += "</body></html>";
   cameraServer.send(200, "text/html", html);
 }
