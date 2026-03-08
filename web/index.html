@@ -1,453 +1,805 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>RC Car Console</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: #f4f1e8;
-        --panel: #fffdf8;
-        --ink: #1f2a2e;
-        --accent: #0d6b5c;
-        --danger: #a63d40;
-        --border: #d9d1bf;
-      }
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>RC Car Controller</title>
+<style>
+  @import url("https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700&display=swap");
 
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: "Segoe UI", sans-serif;
-        color: var(--ink);
-        background: radial-gradient(circle at top, #fffaf0, var(--bg));
-      }
-      main {
-        max-width: 900px;
-        margin: 0 auto;
-        padding: 24px;
-      }
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 16px;
-        margin-bottom: 16px;
-      }
-      .row {
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-      }
-      label {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        min-width: 220px;
-      }
-      input, button {
-        font: inherit;
-        padding: 10px 12px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-      }
-      button {
-        cursor: pointer;
-        background: var(--accent);
-        color: white;
-        border: none;
-      }
-      button.stop { background: var(--danger); }
-      pre {
-        white-space: pre-wrap;
-        background: #f6f6f6;
-        border-radius: 12px;
-        padding: 12px;
-        min-height: 180px;
-        border: 1px solid var(--border);
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <div class="panel">
-        <h1>RC Car Console</h1>
-        <p>Use this page to verify control and camera paths.</p>
+  :root {
+    --bg: #1a1a2e;
+    --panel: #16213e;
+    --green: #4ade80;
+    --orange: #f97316;
+    --red: #ef4444;
+    --blue: #60a5fa;
+    --text: #e2e8f0;
+    --hud: rgba(255, 255, 255, 0.12);
+    --btn-active: rgba(74, 222, 128, 0.3);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    touch-action: manipulation;
+  }
+
+  body {
+    background: #3a7bd5;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: "Share Tech Mono", monospace;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  #app {
+    width: min(420px, 100vw);
+    background: var(--bg);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  #stream-wrap {
+    position: relative;
+    width: 100%;
+    height: 260px;
+    background: #0a0a1a;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #stream-wrap::before {
+    content: "NO SIGNAL";
+    position: absolute;
+    color: rgba(255, 255, 255, 0.15);
+    font-family: "Orbitron", sans-serif;
+    font-size: 13px;
+    letter-spacing: 4px;
+    animation: blink 2s infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  #stream {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    position: relative;
+    z-index: 1;
+    background: #111;
+  }
+
+  #stream[src=""] {
+    opacity: 0;
+  }
+
+  #hud {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 8px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  #hud-left,
+  #hud-right {
+    background: var(--hud);
+    backdrop-filter: blur(4px);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 11px;
+    color: #fff;
+    line-height: 1.6;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+  }
+
+  #hud-left span {
+    display: block;
+  }
+
+  #hud-right {
+    pointer-events: all;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-align: right;
+  }
+
+  #hud-right:active {
+    background: rgba(255, 255, 255, 0.25);
+  }
+
+  .bat-val { color: var(--green); }
+  .rssi-val { color: var(--blue); }
+  .mode-val { color: #fef08a; }
+
+  #toolbar {
+    display: flex;
+    background: var(--panel);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .tb-btn {
+    flex: 1;
+    padding: 11px 4px;
+    font-family: "Orbitron", sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    user-select: none;
+  }
+
+  .tb-btn:last-child {
+    border-right: none;
+  }
+
+  .tb-btn:active,
+  .tb-btn.active {
+    background: var(--btn-active);
+    color: var(--green);
+  }
+
+  .tb-btn.rec-btn {
+    background: var(--red);
+    color: #fff;
+  }
+
+  .tb-btn.rec-btn.active {
+    background: #b91c1c;
+    animation: pulse 1s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  #control-panel {
+    background: #1e1e2e;
+    padding: 10px 10px 14px;
+  }
+
+  #mode-label {
+    text-align: center;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.35);
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+    font-family: "Orbitron", sans-serif;
+  }
+
+  #joystick-outer {
+    width: 100%;
+    height: 220px;
+    background: #111122;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #joystick-outer::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    background-size: 30px 30px;
+  }
+
+  #joystick-outer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+    background-size: 100% 50%, 50% 100%;
+    background-position: center;
+  }
+
+  #joystick-ring {
+    width: 180px;
+    height: 180px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    position: absolute;
+    z-index: 1;
+    box-shadow:
+      0 0 0 30px rgba(255, 255, 255, 0.02),
+      0 0 0 60px rgba(255, 255, 255, 0.015);
+  }
+
+  #joystick-knob {
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #f0e060, #c8a800);
+    border: 8px solid rgba(180, 150, 0, 0.4);
+    position: absolute;
+    cursor: grab;
+    touch-action: none;
+    transition: border-color 0.1s;
+    box-shadow:
+      0 4px 20px rgba(0, 0, 0, 0.5),
+      inset 0 2px 6px rgba(255, 255, 255, 0.2);
+    z-index: 10;
+  }
+
+  #joystick-knob:active {
+    cursor: grabbing;
+    border-color: rgba(255, 220, 0, 0.6);
+  }
+
+  .btn-on {
+    box-shadow: inset 0 0 0 2px var(--green);
+    color: var(--green);
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stream-wrap">
+    <img id="stream" src="" alt="stream">
+    <div id="hud">
+      <div id="hud-left">
+        <span>BAT : <span class="bat-val" id="bat-val">--%</span></span>
+        <span>RSSI : <span class="rssi-val" id="rssi-val">-- dBm</span></span>
       </div>
-
-      <div class="panel">
-        <div class="row">
-          <label>
-            Broker URL
-            <input id="brokerUrl" value="" />
-          </label>
-          <label>
-            Device ID (optional)
-            <input id="deviceId" placeholder="auto" />
-          </label>
-        </div>
-        <div class="row" style="margin-top: 12px">
-          <button id="connectBtn">Connect</button>
-          <button id="disconnectBtn">Disconnect</button>
-        </div>
+      <div id="hud-right" onclick="cycleResolution()">
+        <span id="res-label">QVGA</span><br>
+        <span class="mode-val" id="conn-label">connecting</span>
       </div>
+    </div>
+  </div>
 
-      <div class="panel">
-        <div class="row">
-          <label>
-            Throttle
-            <input id="throttle" type="range" min="-100" max="100" value="0" />
-          </label>
-          <label>
-            Steering
-            <input id="steering" type="range" min="-45" max="45" value="0" />
-          </label>
-        </div>
-        <div class="row" style="margin-top: 12px">
-          <button id="sendBtn">Send Control</button>
-          <button id="stopBtn" class="stop">Stop</button>
-        </div>
-      </div>
+  <div id="toolbar">
+    <button class="tb-btn" id="btn-led" type="button">Led1</button>
+    <button class="tb-btn" id="btn-mode" type="button">MODE</button>
+    <button class="tb-btn" id="btn-snap" type="button">SNAP</button>
+    <button class="tb-btn" id="btn-talk" type="button">TALK</button>
+    <button class="tb-btn rec-btn" id="btn-rec" type="button">rec</button>
+  </div>
 
-      <div class="panel">
-        <pre id="log"></pre>
-      </div>
+  <div id="control-panel">
+    <div id="mode-label">조종 모드</div>
+    <div id="joystick-outer">
+      <div id="joystick-ring"></div>
+      <div id="joystick-knob"></div>
+    </div>
+  </div>
+</div>
 
-      <div class="panel">
-        <div class="row">
-          <label style="flex: 1 1 100%">
-            Video URL
-            <input id="videoUrl" placeholder="http://esp32-ip/stream" />
-          </label>
-        </div>
-        <div class="row" style="margin-top: 12px">
-          <button id="loadVideoBtn">Load Video</button>
-          <button id="clearVideoBtn">Clear Video</button>
-        </div>
-        <div style="margin-top: 16px">
-          <img id="videoFrame" alt="RC car video" style="width: 100%; min-height: 240px; background: #ece8dd; border-radius: 12px; border: 1px solid var(--border); object-fit: contain; transform: scaleX(-1);" />
-        </div>
-      </div>
+<canvas id="snapshot-canvas" hidden></canvas>
 
-      <div class="panel">
-        <div class="row">
-          <button id="startAudioBtn">Start Audio</button>
-          <button id="stopAudioBtn" class="stop">Stop Audio</button>
-        </div>
-        <div style="margin-top: 12px">
-          <strong id="audioStatus">audio idle</strong>
-        </div>
-      </div>
-    </main>
+<script>
+const brokerUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/client`;
+const deviceId = "rc-car-01";
+const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 
-    <script>
-      const brokerInput = document.getElementById("brokerUrl");
-      const deviceIdInput = document.getElementById("deviceId");
-      const throttleInput = document.getElementById("throttle");
-      const steeringInput = document.getElementById("steering");
-      const logEl = document.getElementById("log");
-      const videoUrlInput = document.getElementById("videoUrl");
-      const videoFrame = document.getElementById("videoFrame");
-      const audioStatusEl = document.getElementById("audioStatus");
+let ws;
+let wsReady = false;
+let driveMode = true;
+let resIdx = 0;
+let ledOn = false;
+let talkOn = false;
+let recOn = false;
+let streamUrl = "";
 
-      const defaultProtocol = location.protocol === "https:" ? "wss" : "ws";
-      const defaultHost = location.host || "localhost:8080";
-      brokerInput.value = `${defaultProtocol}://${defaultHost}/client`;
+const streamEl = document.getElementById("stream");
+const connLabel = document.getElementById("conn-label");
+const batVal = document.getElementById("bat-val");
+const rssiVal = document.getElementById("rssi-val");
+const resLabel = document.getElementById("res-label");
+const modeLabel = document.getElementById("mode-label");
+const btnLed = document.getElementById("btn-led");
+const btnMode = document.getElementById("btn-mode");
+const btnSnap = document.getElementById("btn-snap");
+const btnTalk = document.getElementById("btn-talk");
+const btnRec = document.getElementById("btn-rec");
+const knob = document.getElementById("joystick-knob");
+const outerEl = document.getElementById("joystick-outer");
+const snapshotCanvas = document.getElementById("snapshot-canvas");
 
-      let ws = null;
-      let clientPingTimer = null;
-      const audioState = {
-        ctx: null,
-        sampleRate: 16000,
-        enabled: false,
-        nextPlayAt: 0,
-        maxLeadSeconds: 0.24,
-        targetLeadSeconds: 0.05,
-        lastSeqByDevice: new Map()
-      };
+const recorderState = {
+  stream: null,
+  recorder: null,
+  chunks: []
+};
 
-      function log(line) {
-        logEl.textContent += `${new Date().toISOString()} ${line}\n`;
-        logEl.scrollTop = logEl.scrollHeight;
+const audioState = {
+  ctx: null,
+  sampleRate: 16000,
+  enabled: false,
+  nextPlayAt: 0,
+  maxLeadSeconds: 0.24,
+  targetLeadSeconds: 0.05,
+  lastSeqByDevice: new Map()
+};
+
+function setButtonState(button, active) {
+  button.classList.toggle("active", active);
+  button.classList.toggle("btn-on", active && button !== btnRec);
+}
+
+function send(payload) {
+  if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  ws.send(JSON.stringify(payload));
+  return true;
+}
+
+function sendCtrl(throttle, steering) {
+  send({
+    type: "ctrl",
+    deviceId,
+    throttle,
+    steering
+  });
+}
+
+function setStreamUrl(nextUrl) {
+  if (!nextUrl || nextUrl === streamUrl) {
+    return;
+  }
+  const oldUrl = streamUrl;
+  streamUrl = nextUrl;
+  streamEl.src = nextUrl;
+  if (oldUrl.startsWith("blob:")) {
+    URL.revokeObjectURL(oldUrl);
+  }
+}
+
+function connectWS() {
+  ws = new WebSocket(brokerUrl);
+  ws.onopen = () => {
+    wsReady = true;
+    connLabel.textContent = "broker on";
+  };
+  ws.onclose = () => {
+    wsReady = false;
+    connLabel.textContent = "reconnecting";
+    setTimeout(connectWS, 1500);
+  };
+  ws.onerror = () => {
+    connLabel.textContent = "socket error";
+  };
+  ws.onmessage = (event) => {
+    try {
+      handleMessage(JSON.parse(event.data));
+    } catch (_) {
+      connLabel.textContent = "bad packet";
+    }
+  };
+}
+
+function handleMessage(message) {
+  if (message.type === "welcome") {
+    connLabel.textContent = "connected";
+    return;
+  }
+
+  if (message.type === "device_online" && message.deviceId === deviceId) {
+    connLabel.textContent = "device online";
+    return;
+  }
+
+  if (message.type === "device_offline" && message.deviceId === deviceId) {
+    connLabel.textContent = "device offline";
+    return;
+  }
+
+  if (message.type === "status" && message.deviceId === deviceId) {
+    batVal.textContent = message.batteryPct ? `${message.batteryPct}%` : "--%";
+    rssiVal.textContent = message.rssi !== undefined ? `${message.rssi} dBm` : "-- dBm";
+    if (message.remoteVideoUrl) {
+      setStreamUrl(`${location.protocol}//${location.host}${message.remoteVideoUrl}`);
+    } else if (message.localIp && message.streamPath) {
+      setStreamUrl(`http://${message.localIp}${message.streamPath}`);
+    }
+    return;
+  }
+
+  if (message.type === "audio" && message.deviceId === deviceId) {
+    playAudioChunk(message);
+  }
+}
+
+function cycleResolution() {
+  resIdx = (resIdx + 1) % qualityList.length;
+  const value = qualityList[resIdx];
+  resLabel.textContent = value;
+  send({
+    type: "camera_quality",
+    deviceId,
+    quality: value
+  });
+}
+
+function toggleMode() {
+  driveMode = !driveMode;
+  modeLabel.textContent = driveMode ? "조종 모드" : "감시 모드";
+  setButtonState(btnMode, !driveMode);
+  send({
+    type: "mode",
+    deviceId,
+    mode: driveMode ? "drive" : "monitor"
+  });
+}
+
+function toggleLed() {
+  ledOn = !ledOn;
+  setButtonState(btnLed, ledOn);
+  send({
+    type: "led",
+    deviceId,
+    enabled: ledOn
+  });
+}
+
+function doSnap() {
+  btnSnap.classList.add("active");
+  setTimeout(() => btnSnap.classList.remove("active"), 180);
+
+  try {
+    if (!streamEl.src) {
+      return;
+    }
+    snapshotCanvas.width = streamEl.naturalWidth || 1280;
+    snapshotCanvas.height = streamEl.naturalHeight || 720;
+    const ctx = snapshotCanvas.getContext("2d");
+    ctx.drawImage(streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+    snapshotCanvas.toBlob((blob) => {
+      if (!blob) {
+        return;
       }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, "image/jpeg", 0.96);
+  } catch (_) {
+    // ignore browser snapshot failure
+  }
 
-      function setAudioStatus(text) {
-        audioStatusEl.textContent = text;
+  send({
+    type: "snapshot",
+    deviceId
+  });
+}
+
+function talkStart() {
+  talkOn = true;
+  setButtonState(btnTalk, true);
+  send({
+    type: "talk",
+    deviceId,
+    enabled: true
+  });
+}
+
+function talkEnd() {
+  if (!talkOn) {
+    return;
+  }
+  talkOn = false;
+  setButtonState(btnTalk, false);
+  send({
+    type: "talk",
+    deviceId,
+    enabled: false
+  });
+}
+
+async function toggleRec() {
+  if (recOn) {
+    recorderState.recorder?.stop();
+    return;
+  }
+
+  if (!streamEl.captureStream) {
+    return;
+  }
+
+  try {
+    recorderState.stream = streamEl.captureStream();
+    recorderState.chunks = [];
+    recorderState.recorder = new MediaRecorder(recorderState.stream, {
+      mimeType: "video/webm"
+    });
+    recorderState.recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recorderState.chunks.push(event.data);
       }
+    };
+    recorderState.recorder.onstop = () => {
+      const blob = new Blob(recorderState.chunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `rc-record-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+      recOn = false;
+      setButtonState(btnRec, false);
+      btnRec.textContent = "rec";
+    };
+    recorderState.recorder.start();
+    recOn = true;
+    setButtonState(btnRec, true);
+    btnRec.textContent = "rec";
+  } catch (_) {
+    // ignore record failure
+  }
+}
 
-      function loadVideo(url) {
-        if (!url) {
-          log("video url is empty");
-          return;
-        }
-        videoFrame.src = url;
-        log(`video loading: ${url}`);
+const IMA_INDEX_TABLE = [
+  -1, -1, -1, -1, 2, 4, 6, 8,
+  -1, -1, -1, -1, 2, 4, 6, 8
+];
+
+const IMA_STEP_TABLE = [
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+  19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+  130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+  337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+  876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+  2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+  5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+  15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+];
+
+function decodeBase64ToBytes(encoded) {
+  const raw = atob(encoded);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) {
+    bytes[i] = raw.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function decodeAdpcmChunk(bytes, sampleCount) {
+  if (!bytes.length || bytes.length < 4 || sampleCount <= 0) {
+    return new Float32Array(0);
+  }
+
+  let predictor = (bytes[1] << 8) | bytes[0];
+  if (predictor & 0x8000) {
+    predictor -= 0x10000;
+  }
+  let stepIndex = Math.max(0, Math.min(88, bytes[2] || 0));
+  const output = new Float32Array(sampleCount);
+  output[0] = predictor / 32768;
+
+  let outIndex = 1;
+  for (let i = 4; i < bytes.length && outIndex < sampleCount; i += 1) {
+    const packed = bytes[i];
+    for (const nibble of [packed & 0x0f, (packed >> 4) & 0x0f]) {
+      const step = IMA_STEP_TABLE[stepIndex];
+      let diff = step >> 3;
+      if (nibble & 1) diff += step >> 2;
+      if (nibble & 2) diff += step >> 1;
+      if (nibble & 4) diff += step;
+
+      predictor += (nibble & 8) ? -diff : diff;
+      predictor = Math.max(-32768, Math.min(32767, predictor));
+      stepIndex += IMA_INDEX_TABLE[nibble];
+      stepIndex = Math.max(0, Math.min(88, stepIndex));
+      output[outIndex++] = predictor / 32768;
+      if (outIndex >= sampleCount) {
+        break;
       }
+    }
+  }
 
-      function send(payload) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          return;
-        }
-        ws.send(JSON.stringify(payload));
-      }
+  return output;
+}
 
-      function startClientPing() {
-        stopClientPing();
-        clientPingTimer = setInterval(() => {
-          send({ type: "ping" });
-        }, 10000);
-      }
+async function ensureAudioContext(sampleRate = audioState.sampleRate) {
+  if (!audioState.ctx || audioState.sampleRate !== sampleRate) {
+    if (audioState.ctx) {
+      await audioState.ctx.close();
+    }
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    audioState.sampleRate = sampleRate;
+    audioState.ctx = new AudioContextCtor({ sampleRate });
+  }
+  if (audioState.ctx.state !== "running") {
+    await audioState.ctx.resume();
+  }
+}
 
-      function stopClientPing() {
-        if (clientPingTimer) {
-          clearInterval(clientPingTimer);
-          clientPingTimer = null;
-        }
-      }
+function armAudioPlayback() {
+  if (audioState.enabled) {
+    return;
+  }
+  ensureAudioContext(audioState.sampleRate)
+    .then(() => {
+      audioState.enabled = true;
+      audioState.nextPlayAt = 0;
+    })
+    .catch(() => {});
+}
 
-      async function ensureAudioContext(sampleRate = audioState.sampleRate) {
-        if (!audioState.ctx || audioState.sampleRate !== sampleRate) {
-          if (audioState.ctx) {
-            await audioState.ctx.close();
-          }
-          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-          audioState.sampleRate = sampleRate;
-          audioState.ctx = new AudioContextCtor({ sampleRate });
-        }
-        if (audioState.ctx.state !== "running") {
-          await audioState.ctx.resume();
-        }
-      }
+function playAudioChunk(message) {
+  if (!audioState.enabled || !audioState.ctx || !message.payload) {
+    return;
+  }
 
-      function decodeMulawByte(value) {
-        const mu = (~value) & 0xff;
-        const sign = mu & 0x80;
-        const exponent = (mu >> 4) & 0x07;
-        const mantissa = mu & 0x0f;
-        let sample = ((mantissa << 3) + 0x84) << exponent;
-        sample = sign ? 0x84 - sample : sample - 0x84;
-        return sample / 32768;
-      }
+  const seq = Number(message.seq || 0);
+  audioState.lastSeqByDevice.set(message.deviceId || deviceId, seq);
 
-      const IMA_INDEX_TABLE = [
-        -1, -1, -1, -1, 2, 4, 6, 8,
-        -1, -1, -1, -1, 2, 4, 6, 8
-      ];
+  const bytes = decodeBase64ToBytes(message.payload);
+  const sampleRate = Number(message.sampleRate || 16000);
+  const samples = decodeAdpcmChunk(bytes, Number(message.samples || 0));
+  if (!samples.length) {
+    return;
+  }
 
-      const IMA_STEP_TABLE = [
-        7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
-        19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
-        50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
-        130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
-        337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-        876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
-        2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
-        5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
-        15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
-      ];
+  const ctx = audioState.ctx;
+  const buffer = ctx.createBuffer(1, samples.length, sampleRate);
+  buffer.getChannelData(0).set(samples);
 
-      function decodeBase64ToBytes(encoded) {
-        const raw = atob(encoded);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i += 1) {
-          bytes[i] = raw.charCodeAt(i);
-        }
-        return bytes;
-      }
+  const now = ctx.currentTime;
+  if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04) {
+    audioState.nextPlayAt = now + audioState.targetLeadSeconds;
+  }
 
-      function decodeAdpcmChunk(bytes, sampleCount) {
-        if (!bytes.length || bytes.length < 4 || sampleCount <= 0) {
-          return new Float32Array(0);
-        }
+  const queuedAhead = audioState.nextPlayAt - now;
+  if (queuedAhead > audioState.maxLeadSeconds) {
+    audioState.nextPlayAt = now + audioState.targetLeadSeconds;
+    return;
+  }
 
-        let predictor = (bytes[1] << 8) | bytes[0];
-        if (predictor & 0x8000) {
-          predictor -= 0x10000;
-        }
-        let stepIndex = Math.max(0, Math.min(88, bytes[2] || 0));
-        const output = new Float32Array(sampleCount);
-        output[0] = predictor / 32768;
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  source.start(audioState.nextPlayAt);
+  audioState.nextPlayAt += buffer.duration;
+}
 
-        let outIndex = 1;
-        for (let i = 4; i < bytes.length && outIndex < sampleCount; i += 1) {
-          const packed = bytes[i];
-          for (const nibble of [packed & 0x0f, (packed >> 4) & 0x0f]) {
-            let step = IMA_STEP_TABLE[stepIndex];
-            let diff = step >> 3;
-            if (nibble & 1) diff += step >> 2;
-            if (nibble & 2) diff += step >> 1;
-            if (nibble & 4) diff += step;
+let joystickActive = false;
+let jCenterX = 0;
+let jCenterY = 0;
+let jMaxR = 0;
+let lastSendTime = 0;
+const SEND_INTERVAL = 30;
 
-            predictor += (nibble & 8) ? -diff : diff;
-            predictor = Math.max(-32768, Math.min(32767, predictor));
-            stepIndex += IMA_INDEX_TABLE[nibble];
-            stepIndex = Math.max(0, Math.min(88, stepIndex));
+function getJoystickBounds() {
+  const r = outerEl.getBoundingClientRect();
+  jCenterX = r.left + r.width / 2;
+  jCenterY = r.top + r.height / 2;
+  jMaxR = 90;
+}
 
-            output[outIndex++] = predictor / 32768;
-            if (outIndex >= sampleCount) {
-              break;
-            }
-          }
-        }
+function joystickMove(cx, cy) {
+  let dx = cx - jCenterX;
+  let dy = cy - jCenterY;
+  const dist = Math.hypot(dx, dy);
+  if (dist > jMaxR) {
+    dx *= jMaxR / dist;
+    dy *= jMaxR / dist;
+  }
 
-        return output;
-      }
+  knob.style.transform = `translate(${dx}px, ${dy}px)`;
 
-      function playAudioChunk(message) {
-        if (!audioState.enabled || !audioState.ctx || !message.payload) {
-          return;
-        }
+  const now = Date.now();
+  if (now - lastSendTime >= SEND_INTERVAL) {
+    const steering = Math.round((dx / jMaxR) * 100);
+    const throttle = Math.round((-dy / jMaxR) * 100);
+    sendCtrl(throttle, steering);
+    lastSendTime = now;
+  }
+}
 
-        const currentDeviceId = deviceIdInput.value || "rc-car-01";
-        if (message.deviceId && message.deviceId !== currentDeviceId) {
-          return;
-        }
+function joystickReset() {
+  joystickActive = false;
+  knob.style.transition = "transform 0.2s";
+  knob.style.transform = "translate(0,0)";
+  setTimeout(() => {
+    knob.style.transition = "";
+  }, 200);
+  sendCtrl(0, 0);
+}
 
-        const seq = Number(message.seq || 0);
-        const lastSeq = audioState.lastSeqByDevice.get(message.deviceId || currentDeviceId);
-        if (Number.isFinite(lastSeq) && seq > lastSeq + 1) {
-          log(`audio gap: ${seq - lastSeq - 1} chunk(s) dropped`);
-        }
-        audioState.lastSeqByDevice.set(message.deviceId || currentDeviceId, seq);
+outerEl.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  armAudioPlayback();
+  getJoystickBounds();
+  joystickActive = true;
+  joystickMove(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
 
-        const bytes = decodeBase64ToBytes(message.payload);
-        const sampleRate = Number(message.sampleRate || 8000);
-        const ctx = audioState.ctx;
-        let samples;
-        if (message.codec === "adpcm_ima") {
-          samples = decodeAdpcmChunk(bytes, Number(message.samples || 0));
-        } else {
-          samples = new Float32Array(bytes.length);
-          for (let i = 0; i < bytes.length; i += 1) {
-            samples[i] = decodeMulawByte(bytes[i]);
-          }
-        }
+outerEl.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  if (joystickActive) {
+    joystickMove(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
 
-        if (!samples.length) {
-          return;
-        }
+outerEl.addEventListener("touchend", joystickReset);
+outerEl.addEventListener("touchcancel", joystickReset);
 
-        const buffer = ctx.createBuffer(1, samples.length, sampleRate);
-        const channel = buffer.getChannelData(0);
-        channel.set(samples);
+outerEl.addEventListener("mousedown", (e) => {
+  armAudioPlayback();
+  getJoystickBounds();
+  joystickActive = true;
+  joystickMove(e.clientX, e.clientY);
+});
 
-        const now = ctx.currentTime;
-        if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04) {
-          audioState.nextPlayAt = now + audioState.targetLeadSeconds;
-        }
+window.addEventListener("mousemove", (e) => {
+  if (joystickActive) {
+    joystickMove(e.clientX, e.clientY);
+  }
+});
 
-        const queuedAhead = audioState.nextPlayAt - now;
-        if (queuedAhead > audioState.maxLeadSeconds) {
-          audioState.nextPlayAt = now + audioState.targetLeadSeconds;
-          setAudioStatus(`audio resync ${queuedAhead.toFixed(3)}s`);
-          return;
-        }
+window.addEventListener("mouseup", () => {
+  if (joystickActive) {
+    joystickReset();
+  }
+});
 
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        source.connect(ctx.destination);
-        source.start(audioState.nextPlayAt);
-        audioState.nextPlayAt += buffer.duration;
-        setAudioStatus(`audio live ${queuedAhead.toFixed(3)}s queued`);
-      }
+btnLed.addEventListener("click", () => {
+  armAudioPlayback();
+  toggleLed();
+});
 
-      document.getElementById("connectBtn").addEventListener("click", () => {
-        ws = new WebSocket(brokerInput.value);
-        ws.onopen = () => {
-          log("client socket connected");
-          startClientPing();
-        };
-        ws.onclose = () => {
-          stopClientPing();
-          log("client socket closed");
-        };
-        ws.onerror = () => log("client socket error");
-        ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data);
-            if (message.type !== "audio") {
-              log(`recv ${event.data}`);
-            }
-            if (message.type === "status" && message.localIp && message.cameraReady) {
-              const candidate = `http://${message.localIp}${message.streamPath || "/stream"}`;
-              if (!videoUrlInput.value) {
-                videoUrlInput.value = candidate;
-              }
-            }
-            if (message.type === "status" && message.remoteVideoUrl) {
-              const remoteCandidate = `${location.protocol}//${location.host}${message.remoteVideoUrl}`;
-              if (!videoUrlInput.value || videoUrlInput.value.includes("/stream")) {
-                videoUrlInput.value = remoteCandidate;
-              }
-            }
-            if (message.type === "audio") {
-              if (audioState.enabled && message.sampleRate && audioState.sampleRate !== Number(message.sampleRate)) {
-                ensureAudioContext(Number(message.sampleRate)).catch(() => {});
-              }
-              playAudioChunk(message);
-            }
-          } catch {}
-        };
-      });
+btnMode.addEventListener("click", () => {
+  armAudioPlayback();
+  toggleMode();
+});
 
-      document.getElementById("disconnectBtn").addEventListener("click", () => {
-        if (ws) {
-          stopClientPing();
-          ws.close();
-        }
-      });
+btnSnap.addEventListener("click", () => {
+  armAudioPlayback();
+  doSnap();
+});
 
-      document.getElementById("sendBtn").addEventListener("click", () => {
-        send({
-          type: "ctrl",
-          deviceId: deviceIdInput.value || undefined,
-          throttle: Number(throttleInput.value),
-          steering: Number(steeringInput.value)
-        });
-      });
+btnTalk.addEventListener("pointerdown", () => {
+  armAudioPlayback();
+  talkStart();
+});
+btnTalk.addEventListener("pointerup", talkEnd);
+btnTalk.addEventListener("pointercancel", talkEnd);
+btnTalk.addEventListener("pointerleave", talkEnd);
 
-      document.getElementById("stopBtn").addEventListener("click", () => {
-        throttleInput.value = "0";
-        steeringInput.value = "0";
-        send({
-          type: "ctrl",
-          deviceId: deviceIdInput.value || undefined,
-          throttle: 0,
-          steering: 0
-        });
-      });
+btnRec.addEventListener("click", () => {
+  armAudioPlayback();
+  toggleRec();
+});
 
-      document.getElementById("loadVideoBtn").addEventListener("click", () => {
-        loadVideo(videoUrlInput.value);
-      });
-
-      document.getElementById("clearVideoBtn").addEventListener("click", () => {
-        videoFrame.removeAttribute("src");
-        log("video cleared");
-      });
-
-      document.getElementById("startAudioBtn").addEventListener("click", async () => {
-        try {
-          await ensureAudioContext(audioState.sampleRate);
-          audioState.enabled = true;
-          audioState.nextPlayAt = 0;
-          setAudioStatus("audio armed");
-          log("audio enabled");
-        } catch (error) {
-          setAudioStatus("audio error");
-          log(`audio init failed: ${error.message}`);
-        }
-      });
-
-      document.getElementById("stopAudioBtn").addEventListener("click", async () => {
-        audioState.enabled = false;
-        audioState.nextPlayAt = 0;
-        if (audioState.ctx && audioState.ctx.state === "running") {
-          await audioState.ctx.suspend();
-        }
-        setAudioStatus("audio stopped");
-        log("audio disabled");
-      });
-    </script>
-  </body>
+connectWS();
+</script>
+</body>
 </html>

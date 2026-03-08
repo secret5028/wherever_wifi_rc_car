@@ -178,6 +178,26 @@ function getPrimaryDevice() {
   return devices.values().next().value || null;
 }
 
+function resolveTargetDevice(message) {
+  return (message.deviceId && getDevice(message.deviceId)) || getPrimaryDevice();
+}
+
+function forwardClientCommand(ws, message, payload) {
+  const deviceEntry = resolveTargetDevice(message);
+  if (!deviceEntry) {
+    sendJson(ws, { type: "error", reason: "no_device_connected" });
+    return;
+  }
+
+  sendJson(deviceEntry.ws, payload);
+  sendJson(ws, {
+    type: "command_ack",
+    commandType: payload.type,
+    deviceId: deviceEntry.deviceId,
+    sentAt: now()
+  });
+}
+
 function markAlive(entry) {
   entry.lastSeenAt = now();
 }
@@ -292,22 +312,55 @@ clientWss.on("connection", (ws) => {
     }
 
     if (message.type === "ctrl") {
-      const deviceEntry = (message.deviceId && getDevice(message.deviceId)) || getPrimaryDevice();
-      if (!deviceEntry) {
-        sendJson(ws, { type: "error", reason: "no_device_connected" });
-        return;
-      }
-
-      sendJson(deviceEntry.ws, {
+      const payload = {
         type: "ctrl",
         throttle: clamp(Number(message.throttle) || 0, -100, 100),
         steering: clamp(Number(message.steering) || 0, -45, 45),
         sentAt: now()
-      });
+      };
+      forwardClientCommand(ws, message, payload);
+      return;
+    }
 
-      sendJson(ws, {
-        type: "ctrl_ack",
-        deviceId: deviceEntry.deviceId,
+    if (message.type === "camera_quality") {
+      forwardClientCommand(ws, message, {
+        type: "camera_quality",
+        quality: String(message.quality || "QVGA").toUpperCase(),
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "led") {
+      forwardClientCommand(ws, message, {
+        type: "led",
+        enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "mode") {
+      forwardClientCommand(ws, message, {
+        type: "mode",
+        mode: message.mode === "monitor" ? "monitor" : "drive",
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "talk") {
+      forwardClientCommand(ws, message, {
+        type: "talk",
+        enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "snapshot") {
+      forwardClientCommand(ws, message, {
+        type: "snapshot",
         sentAt: now()
       });
     }

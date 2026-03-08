@@ -9,6 +9,10 @@
 
 #include "secrets.h"
 
+#ifndef LED_BUILTIN
+#define LED_BUILTIN -1
+#endif
+
 namespace {
 WebSocketsClient ws;
 WebServer cameraServer(80);
@@ -52,6 +56,9 @@ bool wsConfigured = false;
 bool cameraReady = false;
 bool cameraServerStarted = false;
 bool microphoneReady = false;
+bool driveMode = true;
+bool ledEnabled = false;
+bool talkEnabled = false;
 uint8_t pingFailCount = 0;
 int lastThrottle = 0;
 int lastSteering = 0;
@@ -79,6 +86,18 @@ constexpr int CAM_PIN_HREF = 47;
 constexpr int CAM_PIN_PCLK = 13;
 constexpr int MIC_PIN_CLK = 42;
 constexpr int MIC_PIN_DATA = 41;
+constexpr int MOTOR_PWM_PIN = 2;
+constexpr int SERVO_PWM_PIN = 12;
+constexpr int STATUS_LED_PIN = LED_BUILTIN;
+constexpr uint8_t MOTOR_PWM_CHANNEL = 2;
+constexpr uint8_t SERVO_PWM_CHANNEL = 4;
+constexpr uint32_t MOTOR_PWM_FREQ_HZ = 200;
+constexpr uint8_t MOTOR_PWM_RES_BITS = 12;
+constexpr uint32_t SERVO_PWM_FREQ_HZ = 50;
+constexpr uint8_t SERVO_PWM_RES_BITS = 16;
+constexpr int STEERING_MIN_US = 1100;
+constexpr int STEERING_CENTER_US = 1500;
+constexpr int STEERING_MAX_US = 1900;
 
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
 uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
@@ -102,6 +121,12 @@ constexpr int16_t IMA_STEP_TABLE[89] = {
 };
 }
 
+void writeMotorOutput(int throttle);
+void writeSteeringOutput(int steering);
+void setLedState(bool enabled);
+void applyCameraQuality(const char* quality);
+void initActuators();
+
 void handleRoot();
 void handleJpeg();
 void handleStream();
@@ -109,6 +134,8 @@ void handleStream();
 void safeStop() {
   lastThrottle = 0;
   lastSteering = 0;
+  writeMotorOutput(0);
+  writeSteeringOutput(0);
   Serial.println("[SAFE] stop");
 }
 
@@ -127,6 +154,9 @@ void publishStatus() {
   doc["audioReady"] = microphoneReady;
   doc["audioCodec"] = "adpcm_ima";
   doc["audioSampleRate"] = AUDIO_STREAM_SAMPLE_RATE;
+  doc["mode"] = driveMode ? "drive" : "monitor";
+  doc["ledEnabled"] = ledEnabled;
+  doc["talkEnabled"] = talkEnabled;
   doc["streamPort"] = 80;
   doc["streamPath"] = "/stream";
   doc["localIp"] = WiFi.localIP().toString();
@@ -137,11 +167,87 @@ void publishStatus() {
 }
 
 void applyControl(int throttle, int steering) {
+  if (!driveMode) {
+    safeStop();
+    Serial.println("[CTRL] ignored in monitor mode");
+    return;
+  }
+
   lastThrottle = constrain(throttle, -100, 100);
   lastSteering = constrain(steering, -45, 45);
   lastCommandAt = millis();
+  writeMotorOutput(lastThrottle);
+  writeSteeringOutput(lastSteering);
 
   Serial.printf("[CTRL] throttle=%d steering=%d\n", lastThrottle, lastSteering);
+}
+
+void initActuators() {
+  ledcSetup(MOTOR_PWM_CHANNEL, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS);
+  ledcAttachPin(MOTOR_PWM_PIN, MOTOR_PWM_CHANNEL);
+  ledcWrite(MOTOR_PWM_CHANNEL, 0);
+
+  ledcSetup(SERVO_PWM_CHANNEL, SERVO_PWM_FREQ_HZ, SERVO_PWM_RES_BITS);
+  ledcAttachPin(SERVO_PWM_PIN, SERVO_PWM_CHANNEL);
+  writeSteeringOutput(0);
+
+  if (STATUS_LED_PIN >= 0) {
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
+}
+
+void writeMotorOutput(int throttle) {
+  int forwardThrottle = max(0, throttle);
+  uint32_t maxDuty = (1U << MOTOR_PWM_RES_BITS) - 1U;
+  uint32_t duty = map(forwardThrottle, 0, 100, 0, static_cast<int>(maxDuty));
+  ledcWrite(MOTOR_PWM_CHANNEL, duty);
+}
+
+void writeSteeringOutput(int steering) {
+  int pulseUs = STEERING_CENTER_US;
+  if (steering < 0) {
+    pulseUs = map(steering, -45, 0, STEERING_MIN_US, STEERING_CENTER_US);
+  } else if (steering > 0) {
+    pulseUs = map(steering, 0, 45, STEERING_CENTER_US, STEERING_MAX_US);
+  }
+
+  uint32_t maxDuty = (1U << SERVO_PWM_RES_BITS) - 1U;
+  uint32_t duty = (static_cast<uint32_t>(pulseUs) * maxDuty) / 20000U;
+  ledcWrite(SERVO_PWM_CHANNEL, duty);
+}
+
+void setLedState(bool enabled) {
+  ledEnabled = enabled;
+  if (STATUS_LED_PIN >= 0) {
+    digitalWrite(STATUS_LED_PIN, enabled ? HIGH : LOW);
+  }
+  Serial.printf("[LED] %s\n", enabled ? "on" : "off");
+}
+
+void applyCameraQuality(const char* quality) {
+  sensor_t* sensor = esp_camera_sensor_get();
+  if (sensor == nullptr) {
+    return;
+  }
+
+  framesize_t frameSize = FRAMESIZE_QVGA;
+  int jpegQuality = 14;
+
+  if (strcmp(quality, "VGA") == 0) {
+    frameSize = FRAMESIZE_VGA;
+    jpegQuality = 12;
+  } else if (strcmp(quality, "SVGA") == 0) {
+    frameSize = FRAMESIZE_SVGA;
+    jpegQuality = 12;
+  } else if (strcmp(quality, "UXGA") == 0) {
+    frameSize = FRAMESIZE_UXGA;
+    jpegQuality = 10;
+  }
+
+  sensor->set_framesize(sensor, frameSize);
+  sensor->set_quality(sensor, jpegQuality);
+  Serial.printf("[CAM] quality=%s\n", quality);
 }
 
 void scheduleReconnect() {
@@ -190,6 +296,21 @@ void configureWebSocket() {
         const char* messageType = doc["type"] | "";
         if (strcmp(messageType, "ctrl") == 0) {
           applyControl(doc["throttle"] | 0, doc["steering"] | 0);
+        } else if (strcmp(messageType, "led") == 0) {
+          setLedState(doc["enabled"] | false);
+        } else if (strcmp(messageType, "mode") == 0) {
+          driveMode = strcmp(doc["mode"] | "drive", "monitor") != 0;
+          if (!driveMode) {
+            safeStop();
+          }
+          Serial.printf("[MODE] %s\n", driveMode ? "drive" : "monitor");
+        } else if (strcmp(messageType, "talk") == 0) {
+          talkEnabled = doc["enabled"] | false;
+          Serial.printf("[TALK] %s\n", talkEnabled ? "on" : "off");
+        } else if (strcmp(messageType, "camera_quality") == 0) {
+          applyCameraQuality(doc["quality"] | "QVGA");
+        } else if (strcmp(messageType, "snapshot") == 0) {
+          Serial.println("[SNAP] requested");
         } else if (strcmp(messageType, "pong") == 0) {
           pingFailCount = 0;
         } else if (strcmp(messageType, "hello") == 0) {
@@ -585,6 +706,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n[BOOT] Phase 1 firmware");
+  initActuators();
   safeStop();
   cameraReady = initCamera();
   microphoneReady = initMicrophone();
