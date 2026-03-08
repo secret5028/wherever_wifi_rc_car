@@ -5,6 +5,7 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <libb64/cencode.h>
+#include <Preferences.h>
 #include "esp_camera.h"
 
 #include "secrets.h"
@@ -17,6 +18,7 @@ namespace {
 WebSocketsClient ws;
 WebServer cameraServer(80);
 I2SClass microphone;
+Preferences preferences;
 
 constexpr unsigned long WIFI_RETRY_MS = 5000;
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -25,6 +27,7 @@ constexpr unsigned long PING_INTERVAL_MS = 10000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
+constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr uint8_t MAX_PING_FAILS = 3;
@@ -59,7 +62,11 @@ bool microphoneReady = false;
 bool driveMode = true;
 bool ledEnabled = false;
 bool talkEnabled = false;
+bool apMode = false;
+bool serverStarted = false;
+bool hasStoredWifi = false;
 uint8_t pingFailCount = 0;
+uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
 int lastSteering = 0;
 uint32_t audioSequence = 0;
@@ -87,10 +94,11 @@ constexpr int CAM_PIN_PCLK = 13;
 constexpr int MIC_PIN_CLK = 42;
 constexpr int MIC_PIN_DATA = 41;
 constexpr int MOTOR_PWM_PIN = 2;
-constexpr int SERVO_PWM_PIN = 12;
-constexpr int STATUS_LED_PIN = LED_BUILTIN;
-constexpr uint8_t MOTOR_PWM_CHANNEL = 2;
-constexpr uint8_t SERVO_PWM_CHANNEL = 4;
+constexpr int SERVO_PWM_PIN = 4;
+constexpr int MOTOR_DIR1_PIN = 5;
+constexpr int MOTOR_DIR2_PIN = 6;
+constexpr int STATUS_LED_PIN = 43;
+constexpr int BATTERY_SENSE_PIN = 1;
 constexpr uint32_t MOTOR_PWM_FREQ_HZ = 200;
 constexpr uint8_t MOTOR_PWM_RES_BITS = 12;
 constexpr uint32_t SERVO_PWM_FREQ_HZ = 50;
@@ -98,6 +106,14 @@ constexpr uint8_t SERVO_PWM_RES_BITS = 16;
 constexpr int STEERING_MIN_US = 1100;
 constexpr int STEERING_CENTER_US = 1500;
 constexpr int STEERING_MAX_US = 1900;
+constexpr char PREF_NAMESPACE[] = "rc-car";
+constexpr char PREF_WIFI_SSID[] = "wifi_ssid";
+constexpr char PREF_WIFI_PASS[] = "wifi_pass";
+constexpr char AP_SSID[] = "RC-Car-Setup";
+constexpr char AP_PASSWORD[] = "12345678";
+
+String activeWifiSsid;
+String activeWifiPassword;
 
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
 uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
@@ -126,8 +142,16 @@ void writeSteeringOutput(int steering);
 void setLedState(bool enabled);
 void applyCameraQuality(const char* quality);
 void initActuators();
+bool loadWifiCredentials();
+void saveWifiCredentials(const String& ssid, const String& password);
+void startProvisioningAp();
+void startHttpServer();
+uint32_t readBatteryMilliVolts();
 
 void handleRoot();
+void handleStatusJson();
+void handleControlJson();
+void handleConfigSave();
 void handleJpeg();
 void handleStream();
 
@@ -137,6 +161,53 @@ void safeStop() {
   writeMotorOutput(0);
   writeSteeringOutput(0);
   Serial.println("[SAFE] stop");
+}
+
+bool loadWifiCredentials() {
+  preferences.begin(PREF_NAMESPACE, true);
+  activeWifiSsid = preferences.getString(PREF_WIFI_SSID, "");
+  activeWifiPassword = preferences.getString(PREF_WIFI_PASS, "");
+  preferences.end();
+
+  if (activeWifiSsid.length() == 0 && strlen(WIFI_SSID) > 0) {
+    activeWifiSsid = WIFI_SSID;
+    activeWifiPassword = WIFI_PASSWORD;
+  }
+
+  hasStoredWifi = activeWifiSsid.length() > 0;
+  return hasStoredWifi;
+}
+
+void saveWifiCredentials(const String& ssid, const String& password) {
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putString(PREF_WIFI_SSID, ssid);
+  preferences.putString(PREF_WIFI_PASS, password);
+  preferences.end();
+  activeWifiSsid = ssid;
+  activeWifiPassword = password;
+  hasStoredWifi = true;
+}
+
+void startProvisioningAp() {
+  if (apMode) {
+    return;
+  }
+
+  safeStop();
+  ws.disconnect();
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  apMode = true;
+  wifiConnectInFlight = false;
+  wsConnectInFlight = false;
+  wsConnected = false;
+  Serial.printf("[AP] started ssid=%s ip=%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+}
+
+uint32_t readBatteryMilliVolts() {
+  return analogReadMilliVolts(BATTERY_SENSE_PIN) * 2U;
 }
 
 void publishStatus() {
@@ -157,9 +228,11 @@ void publishStatus() {
   doc["mode"] = driveMode ? "drive" : "monitor";
   doc["ledEnabled"] = ledEnabled;
   doc["talkEnabled"] = talkEnabled;
+  doc["batteryMv"] = readBatteryMilliVolts();
+  doc["apMode"] = apMode;
   doc["streamPort"] = 80;
   doc["streamPath"] = "/stream";
-  doc["localIp"] = WiFi.localIP().toString();
+  doc["localIp"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
 
   String payload;
   serializeJson(doc, payload);
@@ -174,7 +247,7 @@ void applyControl(int throttle, int steering) {
   }
 
   lastThrottle = constrain(throttle, -100, 100);
-  lastSteering = constrain(steering, -45, 45);
+  lastSteering = constrain(steering, -100, 100);
   lastCommandAt = millis();
   writeMotorOutput(lastThrottle);
   writeSteeringOutput(lastSteering);
@@ -183,38 +256,54 @@ void applyControl(int throttle, int steering) {
 }
 
 void initActuators() {
-  ledcSetup(MOTOR_PWM_CHANNEL, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS);
-  ledcAttachPin(MOTOR_PWM_PIN, MOTOR_PWM_CHANNEL);
-  ledcWrite(MOTOR_PWM_CHANNEL, 0);
+  pinMode(MOTOR_DIR1_PIN, OUTPUT);
+  pinMode(MOTOR_DIR2_PIN, OUTPUT);
+  digitalWrite(MOTOR_DIR1_PIN, LOW);
+  digitalWrite(MOTOR_DIR2_PIN, LOW);
 
-  ledcSetup(SERVO_PWM_CHANNEL, SERVO_PWM_FREQ_HZ, SERVO_PWM_RES_BITS);
-  ledcAttachPin(SERVO_PWM_PIN, SERVO_PWM_CHANNEL);
+  ledcAttach(MOTOR_PWM_PIN, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS);
+  ledcWrite(MOTOR_PWM_PIN, 0);
+
+  ledcAttach(SERVO_PWM_PIN, SERVO_PWM_FREQ_HZ, SERVO_PWM_RES_BITS);
   writeSteeringOutput(0);
 
   if (STATUS_LED_PIN >= 0) {
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
   }
+
+  analogReadResolution(12);
 }
 
 void writeMotorOutput(int throttle) {
-  int forwardThrottle = max(0, throttle);
+  // Preserve the older car tuning: UI sends -100..100, legacy drive code used -90..90.
+  int legacyThrottle = map(throttle, -100, 100, -90, 90);
+  int pwmValue = map(legacyThrottle, -90, 90, -2000, 2000);
   uint32_t maxDuty = (1U << MOTOR_PWM_RES_BITS) - 1U;
-  uint32_t duty = map(forwardThrottle, 0, 100, 0, static_cast<int>(maxDuty));
-  ledcWrite(MOTOR_PWM_CHANNEL, duty);
+  uint32_t duty = 0;
+
+  if (pwmValue > 600) {
+    digitalWrite(MOTOR_DIR1_PIN, HIGH);
+    digitalWrite(MOTOR_DIR2_PIN, LOW);
+    duty = map(pwmValue, 0, 2000, 0, static_cast<int>(maxDuty));
+  } else if (pwmValue < -600) {
+    digitalWrite(MOTOR_DIR1_PIN, LOW);
+    digitalWrite(MOTOR_DIR2_PIN, HIGH);
+    duty = map(abs(pwmValue), 0, 2000, 0, static_cast<int>(maxDuty));
+  } else {
+    digitalWrite(MOTOR_DIR1_PIN, LOW);
+    digitalWrite(MOTOR_DIR2_PIN, LOW);
+  }
+
+  ledcWrite(MOTOR_PWM_PIN, duty);
 }
 
 void writeSteeringOutput(int steering) {
-  int pulseUs = STEERING_CENTER_US;
-  if (steering < 0) {
-    pulseUs = map(steering, -45, 0, STEERING_MIN_US, STEERING_CENTER_US);
-  } else if (steering > 0) {
-    pulseUs = map(steering, 0, 45, STEERING_CENTER_US, STEERING_MAX_US);
-  }
-
-  uint32_t maxDuty = (1U << SERVO_PWM_RES_BITS) - 1U;
-  uint32_t duty = (static_cast<uint32_t>(pulseUs) * maxDuty) / 20000U;
-  ledcWrite(SERVO_PWM_CHANNEL, duty);
+  // Match the older steering calibration rather than a generic centered servo map.
+  int legacySteering = map(steering, -100, 100, -90, 90);
+  int servoValue = map(legacySteering, -90, 90, 128, 55);
+  uint32_t duty = (8191U * static_cast<uint32_t>(servoValue)) / 180U;
+  ledcWrite(SERVO_PWM_PIN, duty);
 }
 
 void setLedState(bool enabled) {
@@ -388,25 +477,114 @@ bool initMicrophone() {
   return true;
 }
 
-void startCameraServer() {
-  if (cameraServerStarted) {
+void startHttpServer() {
+  if (serverStarted) {
     return;
   }
   cameraServer.on("/", HTTP_GET, handleRoot);
+  cameraServer.on("/api/status", HTTP_GET, handleStatusJson);
+  cameraServer.on("/api/control", HTTP_POST, handleControlJson);
+  cameraServer.on("/api/config", HTTP_POST, handleConfigSave);
   cameraServer.on("/jpg", HTTP_GET, handleJpeg);
   cameraServer.on("/stream", HTTP_GET, handleStream);
   cameraServer.begin();
+  serverStarted = true;
   cameraServerStarted = true;
-  Serial.println("[CAM] http server started on :80");
+  Serial.println("[HTTP] server started on :80");
 }
 
 void handleRoot() {
   String html;
-  html += "<!doctype html><html><head><meta charset='utf-8'><title>RC Car Camera</title>";
-  html += "<meta name='viewport' content='width=device-width,initial-scale=1'></head><body>";
-  html += "<h1>RC Car Camera</h1><img src='/stream' style='width:100%;max-width:960px;height:auto;transform:scaleX(-1);' />";
-  html += "</body></html>";
+  html += "<!doctype html><html><head><meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>";
+  html += "<title>RC Car</title>";
+  html += "<style>body{font-family:sans-serif;margin:0;background:#111;color:#f4f4f4}main{max-width:720px;margin:0 auto;padding:16px}form,input,button{font:inherit}button{padding:12px 16px;border:0;border-radius:10px}input{padding:12px;border-radius:10px;border:1px solid #444;background:#1d1d1d;color:#fff;width:100%;box-sizing:border-box} .stack{display:grid;gap:12px} .panel{background:#1b1b1b;padding:16px;border-radius:16px} .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} .stream{width:100%;border-radius:16px;transform:scaleX(-1);background:#000} .controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px}.wide{grid-column:1/-1}.pill{font-size:14px;color:#9ad}</style></head><body><main>";
+
+  if (apMode) {
+    html += "<div class='panel stack'><h1>Wi-Fi Setup</h1>";
+    html += "<div class='pill'>AP SSID: ";
+    html += AP_SSID;
+    html += " / password: ";
+    html += AP_PASSWORD;
+    html += "</div>";
+    html += "<form class='stack' method='post' action='/api/config'>";
+    html += "<input name='ssid' placeholder='Wi-Fi SSID' required>";
+    html += "<input name='password' placeholder='Wi-Fi Password' type='password'>";
+    html += "<button type='submit'>Save And Reboot</button>";
+    html += "</form></div>";
+  } else {
+    html += "<div class='panel stack'><h1>RC Car Control</h1>";
+    html += "<div id='status' class='pill'>connecting...</div>";
+    html += "<img class='stream' src='/stream'>";
+    html += "<div class='controls'>";
+    html += "<button onclick='send(100,0)' class='wide'>Forward</button>";
+    html += "<button onclick='send(0,-35)'>Left</button>";
+    html += "<button onclick='send(0,0)'>Stop</button>";
+    html += "<button onclick='send(0,35)'>Right</button>";
+    html += "<button onclick='send(-70,0)' class='wide'>Reverse</button>";
+    html += "</div>";
+    html += "<div class='stack'><label>Throttle <input id='throttle' type='range' min='-100' max='100' value='0'></label>";
+    html += "<label>Steering <input id='steering' type='range' min='-45' max='45' value='0'></label>";
+    html += "<div class='row'><button onclick='applySliders()'>Apply</button><button onclick='toggleLed()'>LED</button></div></div>";
+    html += "</div><script>";
+    html += "async function send(t,s){await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({throttle:t,steering:s})});}";
+    html += "function applySliders(){send(+throttle.value,+steering.value)}";
+    html += "let led=false; async function toggleLed(){led=!led; await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ledEnabled:led})});}";
+    html += "setInterval(async()=>{const r=await fetch('/api/status'); const j=await r.json(); status.textContent='IP '+j.ip+' | RSSI '+j.rssi+' dBm | BAT '+j.batteryMv+' mV | mode '+j.mode;},1500);";
+    html += "</script>";
+  }
+
+  html += "</main></body></html>";
   cameraServer.send(200, "text/html", html);
+}
+
+void handleStatusJson() {
+  StaticJsonDocument<192> doc;
+  doc["apMode"] = apMode;
+  doc["ip"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : 0;
+  doc["batteryMv"] = readBatteryMilliVolts();
+  doc["mode"] = driveMode ? "drive" : "monitor";
+  doc["ledEnabled"] = ledEnabled;
+  doc["throttle"] = lastThrottle;
+  doc["steering"] = lastSteering;
+
+  String payload;
+  serializeJson(doc, payload);
+  cameraServer.send(200, "application/json", payload);
+}
+
+void handleControlJson() {
+  StaticJsonDocument<192> doc;
+  DeserializationError error = deserializeJson(doc, cameraServer.arg("plain"));
+  if (error) {
+    cameraServer.send(400, "application/json", "{\"ok\":false}");
+    return;
+  }
+
+  if (doc.containsKey("ledEnabled")) {
+    setLedState(doc["ledEnabled"] | false);
+  }
+  if (doc.containsKey("throttle") || doc.containsKey("steering")) {
+    applyControl(doc["throttle"] | lastThrottle, doc["steering"] | lastSteering);
+  }
+  cameraServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleConfigSave() {
+  String ssid = cameraServer.arg("ssid");
+  String password = cameraServer.arg("password");
+  ssid.trim();
+  password.trim();
+
+  if (ssid.length() == 0) {
+    cameraServer.send(400, "text/plain", "ssid required");
+    return;
+  }
+
+  saveWifiCredentials(ssid, password);
+  cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Rebooting...</p></body></html>");
+  restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
 }
 
 void handleJpeg() {
@@ -605,7 +783,7 @@ void uploadAudioChunkIfNeeded() {
 }
 
 void connectWebSocket() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (apMode || WiFi.status() != WL_CONNECTED) {
     return;
   }
 
@@ -616,9 +794,19 @@ void connectWebSocket() {
 }
 
 void ensureWifiConnected() {
+  if (apMode) {
+    return;
+  }
+
+  if (!hasStoredWifi) {
+    startProvisioningAp();
+    return;
+  }
+
   wl_status_t wifiStatus = WiFi.status();
   if (wifiStatus == WL_CONNECTED) {
     wifiConnectInFlight = false;
+    wifiFailureCount = 0;
     return;
   }
 
@@ -630,6 +818,11 @@ void ensureWifiConnected() {
       WiFi.disconnect(true, true);
       wifiConnectInFlight = false;
       lastWifiAttemptAt = current;
+      wifiFailureCount++;
+      if (wifiFailureCount >= 3) {
+        Serial.println("[WIFI] falling back to AP mode");
+        startProvisioningAp();
+      }
     }
     return;
   }
@@ -641,13 +834,13 @@ void ensureWifiConnected() {
   lastWifiAttemptAt = current;
   wifiConnectStartedAt = current;
   wifiConnectInFlight = true;
-  Serial.printf("[WIFI] connecting to %s\n", WIFI_SSID);
+  Serial.printf("[WIFI] connecting to %s\n", activeWifiSsid.c_str());
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(activeWifiSsid.c_str(), activeWifiPassword.c_str());
 }
 
 void ensureWebSocketConnected() {
-  if (!WiFi.isConnected()) {
+  if (apMode || !WiFi.isConnected()) {
     wsConnected = false;
     wsConnectInFlight = false;
     return;
@@ -711,7 +904,13 @@ void setup() {
   cameraReady = initCamera();
   microphoneReady = initMicrophone();
   configureWebSocket();
-  ensureWifiConnected();
+  loadWifiCredentials();
+  if (!hasStoredWifi) {
+    startProvisioningAp();
+    startHttpServer();
+  } else {
+    ensureWifiConnected();
+  }
 }
 
 void loop() {
@@ -722,12 +921,12 @@ void loop() {
   }
 
   ensureWifiConnected();
-  if (cameraReady && WiFi.isConnected() && !cameraServerStarted) {
-    startCameraServer();
+  if ((apMode || WiFi.isConnected()) && !serverStarted) {
+    startHttpServer();
   }
   ensureWebSocketConnected();
   ws.loop();
-  if (cameraReady && cameraServerStarted) {
+  if (serverStarted) {
     cameraServer.handleClient();
   }
   sendPingIfNeeded();
