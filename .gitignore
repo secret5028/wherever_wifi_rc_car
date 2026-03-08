@@ -5,3 +5,4 @@ firmware/phase1_esp32/secrets.h
 broker/*.log
 *.out.log
 *.err.log
+arduino-cli.compile.yaml
