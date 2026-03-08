@@ -158,6 +158,7 @@
       let clientPingTimer = null;
       const audioState = {
         ctx: null,
+        sampleRate: 16000,
         enabled: false,
         nextPlayAt: 0,
         maxLeadSeconds: 0.24,
@@ -204,10 +205,14 @@
         }
       }
 
-      async function ensureAudioContext() {
-        if (!audioState.ctx) {
+      async function ensureAudioContext(sampleRate = audioState.sampleRate) {
+        if (!audioState.ctx || audioState.sampleRate !== sampleRate) {
+          if (audioState.ctx) {
+            await audioState.ctx.close();
+          }
           const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-          audioState.ctx = new AudioContextCtor({ sampleRate: 8000 });
+          audioState.sampleRate = sampleRate;
+          audioState.ctx = new AudioContextCtor({ sampleRate });
         }
         if (audioState.ctx.state !== "running") {
           await audioState.ctx.resume();
@@ -310,6 +315,9 @@
               }
             }
             if (message.type === "audio") {
+              if (audioState.enabled && message.sampleRate && audioState.sampleRate !== Number(message.sampleRate)) {
+                ensureAudioContext(Number(message.sampleRate)).catch(() => {});
+              }
               playAudioChunk(message);
             }
           } catch {}
@@ -354,7 +362,7 @@
 
       document.getElementById("startAudioBtn").addEventListener("click", async () => {
         try {
-          await ensureAudioContext();
+          await ensureAudioContext(audioState.sampleRate);
           audioState.enabled = true;
           audioState.nextPlayAt = 0;
           setAudioStatus("audio armed");

@@ -25,11 +25,11 @@ constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 200;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
-constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 8000;
+constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
 constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
-constexpr size_t AUDIO_STREAM_SAMPLES = 320;
+constexpr size_t AUDIO_STREAM_SAMPLES = 640;
 constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
-constexpr size_t AUDIO_BASE64_BUFFER_LEN = 429;
+constexpr size_t AUDIO_BASE64_BUFFER_LEN = 857;
 
 unsigned long lastWifiAttemptAt = 0;
 unsigned long wifiConnectStartedAt = 0;
@@ -398,8 +398,7 @@ void uploadAudioChunkIfNeeded() {
   }
 
   for (size_t i = 0; i < AUDIO_STREAM_SAMPLES; i++) {
-    int32_t mixed = static_cast<int32_t>(audioCaptureBuffer[i * 2]) + static_cast<int32_t>(audioCaptureBuffer[(i * 2) + 1]);
-    int16_t filtered = filterAudioSample(static_cast<int16_t>(mixed / 2));
+    int16_t filtered = filterAudioSample(audioCaptureBuffer[i]);
     audioMuLawBuffer[i] = encodeMuLawSample(filtered);
   }
 
