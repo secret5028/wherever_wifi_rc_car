@@ -1,0 +1,14 @@
+{
+  "name": "rc-car-broker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 1 broker for ESP32 RC car remote control",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.1"
+  }
+}

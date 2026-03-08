@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RC Car Console</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f1e8;
+        --panel: #fffdf8;
+        --ink: #1f2a2e;
+        --accent: #0d6b5c;
+        --danger: #a63d40;
+        --border: #d9d1bf;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(circle at top, #fffaf0, var(--bg));
+      }
+      main {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 220px;
+      }
+      input, button {
+        font: inherit;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+      }
+      button {
+        cursor: pointer;
+        background: var(--accent);
+        color: white;
+        border: none;
+      }
+      button.stop { background: var(--danger); }
+      pre {
+        white-space: pre-wrap;
+        background: #f6f6f6;
+        border-radius: 12px;
+        padding: 12px;
+        min-height: 180px;
+        border: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="panel">
+        <h1>RC Car Console</h1>
+        <p>Use this page to verify control and camera paths.</p>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <label>
+            Broker URL
+            <input id="brokerUrl" value="" />
+          </label>
+          <label>
+            Device ID (optional)
+            <input id="deviceId" placeholder="auto" />
+          </label>
+        </div>
+        <div class="row" style="margin-top: 12px">
+          <button id="connectBtn">Connect</button>
+          <button id="disconnectBtn">Disconnect</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <label>
+            Throttle
+            <input id="throttle" type="range" min="-100" max="100" value="0" />
+          </label>
+          <label>
+            Steering
+            <input id="steering" type="range" min="-45" max="45" value="0" />
+          </label>
+        </div>
+        <div class="row" style="margin-top: 12px">
+          <button id="sendBtn">Send Control</button>
+          <button id="stopBtn" class="stop">Stop</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <pre id="log"></pre>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <label style="flex: 1 1 100%">
+            Video URL
+            <input id="videoUrl" placeholder="http://esp32-ip/stream" />
+          </label>
+        </div>
+        <div class="row" style="margin-top: 12px">
+          <button id="loadVideoBtn">Load Video</button>
+          <button id="clearVideoBtn">Clear Video</button>
+        </div>
+        <div style="margin-top: 16px">
+          <img id="videoFrame" alt="RC car video" style="width: 100%; min-height: 240px; background: #ece8dd; border-radius: 12px; border: 1px solid var(--border); object-fit: contain;" />
+        </div>
+      </div>
+    </main>
+
+    <script>
+      const brokerInput = document.getElementById("brokerUrl");
+      const deviceIdInput = document.getElementById("deviceId");
+      const throttleInput = document.getElementById("throttle");
+      const steeringInput = document.getElementById("steering");
+      const logEl = document.getElementById("log");
+      const videoUrlInput = document.getElementById("videoUrl");
+      const videoFrame = document.getElementById("videoFrame");
+
+      const defaultProtocol = location.protocol === "https:" ? "wss" : "ws";
+      const defaultHost = location.host || "localhost:8080";
+      brokerInput.value = `${defaultProtocol}://${defaultHost}/client`;
+
+      let ws = null;
+
+      function log(line) {
+        logEl.textContent += `${new Date().toISOString()} ${line}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function loadVideo(url) {
+        if (!url) {
+          log("video url is empty");
+          return;
+        }
+        videoFrame.src = url;
+        log(`video loading: ${url}`);
+      }
+
+      function send(payload) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          log("socket not connected");
+          return;
+        }
+        ws.send(JSON.stringify(payload));
+      }
+
+      document.getElementById("connectBtn").addEventListener("click", () => {
+        ws = new WebSocket(brokerInput.value);
+        ws.onopen = () => log("client socket connected");
+        ws.onclose = () => log("client socket closed");
+        ws.onerror = () => log("client socket error");
+        ws.onmessage = (event) => {
+          log(`recv ${event.data}`);
+          try {
+            const message = JSON.parse(event.data);
+            if (message.type === "status" && message.localIp && message.cameraReady) {
+              const candidate = `http://${message.localIp}${message.streamPath || "/stream"}`;
+              if (!videoUrlInput.value) {
+                videoUrlInput.value = candidate;
+              }
+            }
+            if (message.type === "status" && message.remoteVideoUrl) {
+              const remoteCandidate = `${location.protocol}//${location.host}${message.remoteVideoUrl}`;
+              if (!videoUrlInput.value || videoUrlInput.value.includes("/stream")) {
+                videoUrlInput.value = remoteCandidate;
+              }
+            }
+          } catch {}
+        };
+      });
+
+      document.getElementById("disconnectBtn").addEventListener("click", () => {
+        if (ws) {
+          ws.close();
+        }
+      });
+
+      document.getElementById("sendBtn").addEventListener("click", () => {
+        send({
+          type: "ctrl",
+          deviceId: deviceIdInput.value || undefined,
+          throttle: Number(throttleInput.value),
+          steering: Number(steeringInput.value)
+        });
+      });
+
+      document.getElementById("stopBtn").addEventListener("click", () => {
+        throttleInput.value = "0";
+        steeringInput.value = "0";
+        send({
+          type: "ctrl",
+          deviceId: deviceIdInput.value || undefined,
+          throttle: 0,
+          steering: 0
+        });
+      });
+
+      document.getElementById("loadVideoBtn").addEventListener("click", () => {
+        loadVideo(videoUrlInput.value);
+      });
+
+      document.getElementById("clearVideoBtn").addEventListener("click", () => {
+        videoFrame.removeAttribute("src");
+        log("video cleared");
+      });
+    </script>
+  </body>
+</html>
