@@ -268,7 +268,7 @@
 <body>
 <div id="app">
   <div id="stream-wrap">
-    <img id="stream" src="" alt="stream">
+    <img id="stream" src="" alt="stream" crossorigin="anonymous">
     <div id="hud">
       <div id="hud-left">
         <span>BAT : <span class="bat-val" id="bat-val">--%</span></span>
@@ -332,11 +332,13 @@ const snapshotCanvas = document.getElementById("snapshot-canvas");
 const recorderState = {
   stream: null,
   recorder: null,
-  chunks: []
+  chunks: [],
+  renderTimer: null
 };
 
 const audioState = {
   ctx: null,
+  mixDestination: null,
   sampleRate: 16000,
   enabled: false,
   nextPlayAt: 0,
@@ -368,12 +370,12 @@ function sendCtrl(throttle, steering) {
 }
 
 function setStreamUrl(nextUrl) {
-  if (!nextUrl || nextUrl === streamUrl) {
+  if (nextUrl === streamUrl) {
     return;
   }
   const oldUrl = streamUrl;
-  streamUrl = nextUrl;
-  streamEl.src = nextUrl;
+  streamUrl = nextUrl || "";
+  streamEl.src = streamUrl;
   if (oldUrl.startsWith("blob:")) {
     URL.revokeObjectURL(oldUrl);
   }
@@ -388,6 +390,7 @@ function connectWS() {
   ws.onclose = () => {
     wsReady = false;
     connLabel.textContent = "reconnecting";
+    setStreamUrl("");
     setTimeout(connectWS, 1500);
   };
   ws.onerror = () => {
@@ -404,7 +407,9 @@ function connectWS() {
 
 function handleMessage(message) {
   if (message.type === "welcome") {
-    connLabel.textContent = "connected";
+    connLabel.textContent = Array.isArray(message.devices) && message.devices.includes(deviceId)
+      ? "device online"
+      : "connected";
     return;
   }
 
@@ -419,10 +424,16 @@ function handleMessage(message) {
   }
 
   if (message.type === "status" && message.deviceId === deviceId) {
-    batVal.textContent = message.batteryPct ? `${message.batteryPct}%` : "--%";
+    if (typeof message.batteryPct === "number") {
+      batVal.textContent = `${message.batteryPct}%`;
+    } else if (typeof message.batteryMv === "number") {
+      batVal.textContent = `${(message.batteryMv / 1000).toFixed(2)}V`;
+    } else {
+      batVal.textContent = "--";
+    }
     rssiVal.textContent = message.rssi !== undefined ? `${message.rssi} dBm` : "-- dBm";
     if (message.remoteVideoUrl) {
-      setStreamUrl(`${location.protocol}//${location.host}${message.remoteVideoUrl}`);
+      setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
     } else if (message.localIp && message.streamPath) {
       setStreamUrl(`http://${message.localIp}${message.streamPath}`);
     }
@@ -528,12 +539,31 @@ async function toggleRec() {
     return;
   }
 
-  if (!streamEl.captureStream) {
+  if (!streamEl.src) {
     return;
   }
 
   try {
-    recorderState.stream = streamEl.captureStream();
+    const width = streamEl.naturalWidth || 640;
+    const height = streamEl.naturalHeight || 480;
+    snapshotCanvas.width = width;
+    snapshotCanvas.height = height;
+    const snapshotCtx = snapshotCanvas.getContext("2d");
+    recorderState.renderTimer = window.setInterval(() => {
+      try {
+        snapshotCtx.drawImage(streamEl, 0, 0, width, height);
+      } catch (_) {
+        // ignore transient draw failures
+      }
+    }, 100);
+
+    recorderState.stream = snapshotCanvas.captureStream(12);
+    if (audioState.mixDestination) {
+      const [audioTrack] = audioState.mixDestination.stream.getAudioTracks();
+      if (audioTrack) {
+        recorderState.stream.addTrack(audioTrack);
+      }
+    }
     recorderState.chunks = [];
     recorderState.recorder = new MediaRecorder(recorderState.stream, {
       mimeType: "video/webm"
@@ -544,6 +574,11 @@ async function toggleRec() {
       }
     };
     recorderState.recorder.onstop = () => {
+      if (recorderState.renderTimer) {
+        window.clearInterval(recorderState.renderTimer);
+        recorderState.renderTimer = null;
+      }
+      recorderState.stream?.getTracks().forEach((track) => track.stop());
       const blob = new Blob(recorderState.chunks, { type: "video/webm" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -554,6 +589,9 @@ async function toggleRec() {
       recOn = false;
       setButtonState(btnRec, false);
       btnRec.textContent = "rec";
+      recorderState.stream = null;
+      recorderState.recorder = null;
+      recorderState.chunks = [];
     };
     recorderState.recorder.start();
     recOn = true;
@@ -635,6 +673,7 @@ async function ensureAudioContext(sampleRate = audioState.sampleRate) {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     audioState.sampleRate = sampleRate;
     audioState.ctx = new AudioContextCtor({ sampleRate });
+    audioState.mixDestination = audioState.ctx.createMediaStreamDestination();
   }
   if (audioState.ctx.state !== "running") {
     await audioState.ctx.resume();
@@ -686,6 +725,9 @@ function playAudioChunk(message) {
   const source = ctx.createBufferSource();
   source.buffer = buffer;
   source.connect(ctx.destination);
+  if (audioState.mixDestination) {
+    source.connect(audioState.mixDestination);
+  }
   source.start(audioState.nextPlayAt);
   audioState.nextPlayAt += buffer.duration;
 }
@@ -699,12 +741,16 @@ const SEND_INTERVAL = 30;
 
 function getJoystickBounds() {
   const r = outerEl.getBoundingClientRect();
+  const ringRect = document.getElementById("joystick-ring").getBoundingClientRect();
   jCenterX = r.left + r.width / 2;
   jCenterY = r.top + r.height / 2;
-  jMaxR = 90;
+  jMaxR = ringRect.width / 2;
 }
 
 function joystickMove(cx, cy) {
+  if (!driveMode) {
+    return;
+  }
   let dx = cx - jCenterX;
   let dy = cy - jCenterY;
   const dist = Math.hypot(dx, dy);
@@ -738,6 +784,9 @@ outerEl.addEventListener("touchstart", (e) => {
   e.preventDefault();
   armAudioPlayback();
   getJoystickBounds();
+  if (!driveMode) {
+    return;
+  }
   joystickActive = true;
   joystickMove(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: false });
@@ -755,9 +804,16 @@ outerEl.addEventListener("touchcancel", joystickReset);
 outerEl.addEventListener("mousedown", (e) => {
   armAudioPlayback();
   getJoystickBounds();
+  if (!driveMode) {
+    return;
+  }
   joystickActive = true;
   joystickMove(e.clientX, e.clientY);
 });
+
+window.addEventListener("resize", getJoystickBounds);
+document.addEventListener("pointerdown", armAudioPlayback, { passive: true });
+document.addEventListener("keydown", armAudioPlayback);
 
 window.addEventListener("mousemove", (e) => {
   if (joystickActive) {

@@ -147,6 +147,7 @@ void saveWifiCredentials(const String& ssid, const String& password);
 void startProvisioningAp();
 void startHttpServer();
 uint32_t readBatteryMilliVolts();
+uint8_t estimateBatteryPercent(uint32_t batteryMv);
 
 void handleRoot();
 void handleStatusJson();
@@ -210,6 +211,12 @@ uint32_t readBatteryMilliVolts() {
   return analogReadMilliVolts(BATTERY_SENSE_PIN) * 2U;
 }
 
+uint8_t estimateBatteryPercent(uint32_t batteryMv) {
+  // Simple 2S Li-ion estimate for the dashboard: 6.4V empty, 8.4V full.
+  long percent = map(static_cast<long>(constrain(batteryMv, 6400UL, 8400UL)), 6400L, 8400L, 0L, 100L);
+  return static_cast<uint8_t>(constrain(percent, 0L, 100L));
+}
+
 void publishStatus() {
   if (!wsConnected) {
     return;
@@ -229,6 +236,7 @@ void publishStatus() {
   doc["ledEnabled"] = ledEnabled;
   doc["talkEnabled"] = talkEnabled;
   doc["batteryMv"] = readBatteryMilliVolts();
+  doc["batteryPct"] = estimateBatteryPercent(doc["batteryMv"]);
   doc["apMode"] = apMode;
   doc["streamPort"] = 80;
   doc["streamPath"] = "/stream";
@@ -544,6 +552,7 @@ void handleStatusJson() {
   doc["ip"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
   doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : 0;
   doc["batteryMv"] = readBatteryMilliVolts();
+  doc["batteryPct"] = estimateBatteryPercent(doc["batteryMv"]);
   doc["mode"] = driveMode ? "drive" : "monitor";
   doc["ledEnabled"] = ledEnabled;
   doc["throttle"] = lastThrottle;
@@ -733,7 +742,7 @@ size_t encodeAdpcmBlock(const int16_t* input, size_t sampleCount, uint8_t* outpu
 }
 
 void uploadAudioChunkIfNeeded() {
-  if (!microphoneReady || !wsConnected) {
+  if (!microphoneReady || !wsConnected || talkEnabled) {
     return;
   }
 

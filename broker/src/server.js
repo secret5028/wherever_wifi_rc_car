@@ -49,6 +49,7 @@ function attachVideoClient(deviceEntry, res) {
   res.writeHead(200, {
     "Content-Type": "multipart/x-mixed-replace; boundary=frame",
     "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Access-Control-Allow-Origin": "*",
     Connection: "close",
     Pragma: "no-cache"
   });
@@ -315,7 +316,7 @@ clientWss.on("connection", (ws) => {
       const payload = {
         type: "ctrl",
         throttle: clamp(Number(message.throttle) || 0, -100, 100),
-        steering: clamp(Number(message.steering) || 0, -45, 45),
+        steering: clamp(Number(message.steering) || 0, -100, 100),
         sentAt: now()
       };
       forwardClientCommand(ws, message, payload);
