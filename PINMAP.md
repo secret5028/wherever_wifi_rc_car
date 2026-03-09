@@ -4,7 +4,7 @@
 
 - `GPIO1`: battery sense
 - `GPIO2`: motor PWM
-- `GPIO4`: steering servo PWM
+- `GPIO3`: steering servo PWM via `ESP32Servo`
 - `GPIO5`: motor direction 1
 - `GPIO6`: motor direction 2
 - `GPIO41`: microphone clock
@@ -30,7 +30,7 @@
 
 ## Free Pin Candidates
 
-- `GPIO3`
+- `GPIO4`
 - `GPIO7`
 - `GPIO8`
 - `GPIO9`
@@ -55,7 +55,8 @@ Motor control is intentionally planned around the user's previous 3-pin pattern:
 
 ### Steering Servo
 
-- `PWM`: `GPIO4`
+- `PWM`: `GPIO3`
+- Control path: `ESP32Servo`
 
 ### Status LED
 
@@ -65,7 +66,7 @@ Motor control is intentionally planned around the user's previous 3-pin pattern:
 
 - `BCLK`: `GPIO7`
 - `LRC / WS`: `GPIO8`
-- `DIN`: `GPIO3`
+- `DIN`: `GPIO4`
 
 ## Summary
 
@@ -78,4 +79,8 @@ The current board and firmware layout can support:
 - status LED
 - one MAX98357A-class I2S amp module
 
-This conclusion is about board capability and pin availability only. Speaker playback still requires firmware implementation.
+Notes:
+
+- Steering is now confirmed working on `GPIO3` when driven through `ESP32Servo`.
+- Camera should initialize before actuator setup so servo control is not disturbed by camera startup.
+- Speaker playback still requires firmware implementation even though the amp pin budget is available.

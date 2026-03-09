@@ -199,6 +199,16 @@ function forwardClientCommand(ws, message, payload) {
   });
 }
 
+function forwardClientAudio(ws, message, payload) {
+  const deviceEntry = resolveTargetDevice(message);
+  if (!deviceEntry) {
+    return false;
+  }
+
+  sendJson(deviceEntry.ws, payload);
+  return true;
+}
+
 function markAlive(entry) {
   entry.lastSeenAt = now();
 }
@@ -354,6 +364,19 @@ clientWss.on("connection", (ws) => {
       forwardClientCommand(ws, message, {
         type: "talk",
         enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "talk_audio") {
+      forwardClientAudio(ws, message, {
+        type: "talk_audio",
+        codec: String(message.codec || "adpcm_ima"),
+        sampleRate: clamp(Number(message.sampleRate) || 16000, 8000, 24000),
+        samples: clamp(Number(message.samples) || 0, 1, 1024),
+        seq: Number(message.seq) || 0,
+        payload: String(message.payload || ""),
         sentAt: now()
       });
       return;

@@ -392,6 +392,17 @@ const audioState = {
   lastSeqByDevice: new Map()
 };
 
+const talkAudioState = {
+  ctx: null,
+  stream: null,
+  source: null,
+  processor: null,
+  muteGain: null,
+  pendingSamples: [],
+  seq: 0,
+  stepIndex: 0
+};
+
 function setButtonState(button, active) {
   button.classList.toggle("active", active);
   button.classList.toggle("btn-on", active && button !== btnRec);
@@ -631,7 +642,15 @@ async function doSnap() {
   });
 }
 
-function talkStart() {
+async function talkStart() {
+  if (talkOn) {
+    return;
+  }
+  armAudioPlayback();
+  const ok = await ensureTalkCapture();
+  if (!ok) {
+    return;
+  }
   talkOn = true;
   setButtonState(btnTalk, true);
   send({
@@ -641,7 +660,7 @@ function talkStart() {
   });
 }
 
-function talkEnd() {
+async function talkEnd() {
   if (!talkOn) {
     return;
   }
@@ -652,6 +671,7 @@ function talkEnd() {
     deviceId,
     enabled: false
   });
+  await stopTalkCapture();
 }
 
 async function toggleRec() {
@@ -749,6 +769,14 @@ function decodeBase64ToBytes(encoded) {
   return bytes;
 }
 
+function encodeBytesToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 function decodeAdpcmChunk(bytes, sampleCount) {
   if (!bytes.length || bytes.length < 4 || sampleCount <= 0) {
     return new Float32Array(0);
@@ -784,6 +812,151 @@ function decodeAdpcmChunk(bytes, sampleCount) {
   }
 
   return output;
+}
+
+function encodeAdpcmChunk(samples) {
+  if (!samples.length) {
+    return new Uint8Array(0);
+  }
+
+  let predictor = samples[0];
+  let stepIndex = Math.max(0, Math.min(88, talkAudioState.stepIndex));
+  const output = new Uint8Array(4 + Math.ceil(Math.max(0, samples.length - 1) / 2));
+  output[0] = predictor & 0xff;
+  output[1] = (predictor >> 8) & 0xff;
+  output[2] = stepIndex & 0xff;
+  output[3] = 0;
+
+  let outIndex = 4;
+  for (let i = 1; i < samples.length; i += 2) {
+    let packed = 0;
+    for (let nibbleIndex = 0; nibbleIndex < 2; nibbleIndex += 1) {
+      const sample = samples[i + nibbleIndex];
+      if (typeof sample !== "number") {
+        continue;
+      }
+
+      const step = IMA_STEP_TABLE[stepIndex];
+      let diff = sample - predictor;
+      let nibble = 0;
+      if (diff < 0) {
+        nibble = 8;
+        diff = -diff;
+      }
+
+      let delta = step >> 3;
+      if (diff >= step) {
+        nibble |= 4;
+        diff -= step;
+        delta += step;
+      }
+      if (diff >= (step >> 1)) {
+        nibble |= 2;
+        diff -= step >> 1;
+        delta += step >> 1;
+      }
+      if (diff >= (step >> 2)) {
+        nibble |= 1;
+        delta += step >> 2;
+      }
+
+      predictor += (nibble & 8) ? -delta : delta;
+      predictor = Math.max(-32768, Math.min(32767, predictor));
+      stepIndex += IMA_INDEX_TABLE[nibble & 0x0f];
+      stepIndex = Math.max(0, Math.min(88, stepIndex));
+      packed |= nibbleIndex === 0 ? nibble : (nibble << 4);
+    }
+    output[outIndex++] = packed;
+  }
+
+  talkAudioState.stepIndex = stepIndex;
+  return output;
+}
+
+function flushTalkSamples(force = false) {
+  const chunkSize = 640;
+  while (talkAudioState.pendingSamples.length >= chunkSize || (force && talkAudioState.pendingSamples.length > 1)) {
+    const take = talkAudioState.pendingSamples.length >= chunkSize ? chunkSize : talkAudioState.pendingSamples.length;
+    const chunk = talkAudioState.pendingSamples.splice(0, take);
+    const encoded = encodeAdpcmChunk(chunk);
+    if (!encoded.length) {
+      continue;
+    }
+    send({
+      type: "talk_audio",
+      deviceId,
+      codec: "adpcm_ima",
+      sampleRate: audioState.sampleRate,
+      samples: chunk.length,
+      seq: talkAudioState.seq++,
+      payload: encodeBytesToBase64(encoded)
+    });
+  }
+}
+
+async function stopTalkCapture() {
+  flushTalkSamples(true);
+  talkAudioState.processor?.disconnect();
+  talkAudioState.source?.disconnect();
+  talkAudioState.muteGain?.disconnect();
+  talkAudioState.stream?.getTracks().forEach((track) => track.stop());
+  if (talkAudioState.ctx) {
+    try {
+      await talkAudioState.ctx.close();
+    } catch (_) {
+      // ignore close failure
+    }
+  }
+  talkAudioState.ctx = null;
+  talkAudioState.stream = null;
+  talkAudioState.source = null;
+  talkAudioState.processor = null;
+  talkAudioState.muteGain = null;
+  talkAudioState.pendingSamples = [];
+}
+
+async function ensureTalkCapture() {
+  if (talkAudioState.processor) {
+    return true;
+  }
+
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  try {
+    talkAudioState.ctx = new AudioContextCtor({ sampleRate: audioState.sampleRate });
+    await talkAudioState.ctx.resume();
+    talkAudioState.stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+    talkAudioState.source = talkAudioState.ctx.createMediaStreamSource(talkAudioState.stream);
+    talkAudioState.processor = talkAudioState.ctx.createScriptProcessor(1024, 1, 1);
+    talkAudioState.muteGain = talkAudioState.ctx.createGain();
+    talkAudioState.muteGain.gain.value = 0;
+    talkAudioState.pendingSamples = [];
+    talkAudioState.stepIndex = 0;
+    talkAudioState.processor.onaudioprocess = (event) => {
+      if (!talkOn || !wsReady) {
+        return;
+      }
+      const input = event.inputBuffer.getChannelData(0);
+      for (let i = 0; i < input.length; i += 1) {
+        const sample = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
+        talkAudioState.pendingSamples.push(sample);
+      }
+      flushTalkSamples(false);
+    };
+    talkAudioState.source.connect(talkAudioState.processor);
+    talkAudioState.processor.connect(talkAudioState.muteGain);
+    talkAudioState.muteGain.connect(talkAudioState.ctx.destination);
+    return true;
+  } catch (_) {
+    await stopTalkCapture();
+    return false;
+  }
 }
 
 async function ensureAudioContext(sampleRate = audioState.sampleRate) {
@@ -979,6 +1152,7 @@ btnRec.addEventListener("click", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    talkEnd();
     setStreamUrl("");
     releaseWakeLock();
   } else {
@@ -990,6 +1164,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 window.addEventListener("pagehide", () => {
+  talkEnd();
   setStreamUrl("");
   releaseWakeLock();
 });

@@ -7,6 +7,7 @@
 #include <libb64/cencode.h>
 #include <Preferences.h>
 #include <ESP32Servo.h>
+#include <mbedtls/base64.h>
 #include "esp_camera.h"
 
 #include "secrets.h"
@@ -19,6 +20,7 @@ namespace {
 WebSocketsClient ws;
 WebServer cameraServer(80);
 I2SClass microphone;
+I2SClass speaker;
 Preferences preferences;
 Servo steeringServo;
 
@@ -36,6 +38,7 @@ constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
+constexpr uint32_t AUDIO_PLAYBACK_SAMPLE_RATE = 16000;
 constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
 constexpr size_t AUDIO_STREAM_SAMPLES = 640;
 constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
@@ -62,6 +65,7 @@ bool wsConfigured = false;
 bool cameraReady = false;
 bool cameraServerStarted = false;
 bool microphoneReady = false;
+bool speakerReady = false;
 bool driveMode = true;
 bool ledEnabled = false;
 bool talkEnabled = false;
@@ -102,6 +106,9 @@ constexpr int MOTOR_DIR1_PIN = 5;
 constexpr int MOTOR_DIR2_PIN = 6;
 constexpr int STATUS_LED_PIN = 43;
 constexpr int BATTERY_SENSE_PIN = 1;
+constexpr int AMP_BCLK_PIN = 7;
+constexpr int AMP_WS_PIN = 8;
+constexpr int AMP_DIN_PIN = 4;
 constexpr uint8_t MOTOR_PWM_CHANNEL = 2;
 constexpr uint32_t MOTOR_PWM_FREQ_HZ = 200;
 constexpr uint8_t MOTOR_PWM_RES_BITS = 12;
@@ -129,6 +136,9 @@ String activeDeviceId;
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
 uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
 char audioBase64Buffer[AUDIO_BASE64_BUFFER_LEN] = {};
+uint8_t audioDecodeBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
+int16_t audioPlaybackBuffer[AUDIO_STREAM_SAMPLES] = {};
+uint8_t speakerFrameBuffer[AUDIO_STREAM_SAMPLES * 4] = {};
 
 constexpr int8_t IMA_INDEX_TABLE[16] = {
   -1, -1, -1, -1, 2, 4, 6, 8,
@@ -166,6 +176,9 @@ void handleControlJson();
 void handleConfigSave();
 void handleJpeg();
 void handleStream();
+size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
+size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
+void playSpeakerSamples(const int16_t* samples, size_t sampleCount);
 
 void safeStop() {
   lastThrottle = 0;
@@ -448,6 +461,24 @@ void configureWebSocket() {
         } else if (strcmp(messageType, "talk") == 0) {
           talkEnabled = doc["enabled"] | false;
           Serial.printf("[TALK] %s\n", talkEnabled ? "on" : "off");
+        } else if (strcmp(messageType, "talk_audio") == 0) {
+          if (!speakerReady) {
+            return;
+          }
+          const char* payloadBase64 = doc["payload"] | "";
+          size_t decodedLen = decodeBase64Payload(payloadBase64, audioDecodeBuffer, sizeof(audioDecodeBuffer));
+          if (decodedLen == 0) {
+            Serial.println("[SPK] base64 decode failed");
+            return;
+          }
+          size_t sampleCount = static_cast<size_t>(doc["samples"] | static_cast<int>(AUDIO_STREAM_SAMPLES));
+          sampleCount = min(sampleCount, static_cast<size_t>(AUDIO_STREAM_SAMPLES));
+          size_t pcmSamples = decodeAdpcmBlock(audioDecodeBuffer, decodedLen, audioPlaybackBuffer, sampleCount);
+          if (pcmSamples == 0) {
+            Serial.println("[SPK] adpcm decode failed");
+            return;
+          }
+          playSpeakerSamples(audioPlaybackBuffer, pcmSamples);
         } else if (strcmp(messageType, "camera_quality") == 0) {
           applyCameraQuality(doc["quality"] | "QVGA");
         } else if (strcmp(messageType, "snapshot") == 0) {
@@ -536,6 +567,18 @@ bool initMicrophone() {
   }
 
   Serial.println("[MIC] ready");
+  return true;
+}
+
+bool initSpeaker() {
+  speaker.setPins(AMP_BCLK_PIN, AMP_WS_PIN, AMP_DIN_PIN);
+  bool ok = speaker.begin(I2S_MODE_STD, AUDIO_PLAYBACK_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+  if (!ok) {
+    Serial.printf("[SPK] init failed: %d\n", speaker.lastError());
+    return false;
+  }
+
+  Serial.printf("[SPK] ready bclk=%d ws=%d din=%d\n", AMP_BCLK_PIN, AMP_WS_PIN, AMP_DIN_PIN);
   return true;
 }
 
@@ -839,6 +882,67 @@ size_t encodeAdpcmBlock(const int16_t* input, size_t sampleCount, uint8_t* outpu
   return outIndex;
 }
 
+size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize) {
+  if (encoded == nullptr || output == nullptr || outputSize == 0) {
+    return 0;
+  }
+
+  size_t decodedLen = 0;
+  int rc = mbedtls_base64_decode(output, outputSize, &decodedLen,
+    reinterpret_cast<const unsigned char*>(encoded), strlen(encoded));
+  if (rc != 0) {
+    return 0;
+  }
+  return decodedLen;
+}
+
+size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples) {
+  if (input == nullptr || output == nullptr || inputLen < AUDIO_ADPCM_HEADER_BYTES || maxSamples == 0) {
+    return 0;
+  }
+
+  int16_t predictor = static_cast<int16_t>(input[0] | (static_cast<uint16_t>(input[1]) << 8));
+  int8_t stepIndex = static_cast<int8_t>(constrain(static_cast<int>(input[2]), 0, 88));
+  size_t outIndex = 0;
+  output[outIndex++] = predictor;
+
+  for (size_t i = AUDIO_ADPCM_HEADER_BYTES; i < inputLen && outIndex < maxSamples; ++i) {
+    uint8_t packed = input[i];
+    for (uint8_t nibbleIndex = 0; nibbleIndex < 2 && outIndex < maxSamples; ++nibbleIndex) {
+      uint8_t nibble = (nibbleIndex == 0) ? (packed & 0x0F) : ((packed >> 4) & 0x0F);
+      int step = IMA_STEP_TABLE[stepIndex];
+      int diff = step >> 3;
+      if (nibble & 1) diff += step >> 2;
+      if (nibble & 2) diff += step >> 1;
+      if (nibble & 4) diff += step;
+
+      predictor += (nibble & 8) ? -diff : diff;
+      predictor = constrain(predictor, static_cast<int16_t>(-32768), static_cast<int16_t>(32767));
+      stepIndex = static_cast<int8_t>(constrain(stepIndex + IMA_INDEX_TABLE[nibble], 0, 88));
+      output[outIndex++] = predictor;
+    }
+  }
+
+  return outIndex;
+}
+
+void playSpeakerSamples(const int16_t* samples, size_t sampleCount) {
+  if (!speakerReady || samples == nullptr || sampleCount == 0) {
+    return;
+  }
+
+  for (size_t i = 0; i < sampleCount; ++i) {
+    int16_t sample = samples[i];
+    size_t offset = i * 4;
+    speakerFrameBuffer[offset + 0] = static_cast<uint8_t>(sample & 0xff);
+    speakerFrameBuffer[offset + 1] = static_cast<uint8_t>((sample >> 8) & 0xff);
+    speakerFrameBuffer[offset + 2] = static_cast<uint8_t>(sample & 0xff);
+    speakerFrameBuffer[offset + 3] = static_cast<uint8_t>((sample >> 8) & 0xff);
+  }
+
+  speaker.write(speakerFrameBuffer, sampleCount * 4);
+}
+
 void uploadAudioChunkIfNeeded() {
   if (!microphoneReady || !wsConnected || talkEnabled) {
     return;
@@ -1016,6 +1120,7 @@ void setup() {
   cameraReady = initCamera();
   initActuators();
   microphoneReady = initMicrophone();
+  speakerReady = initSpeaker();
   configureWebSocket();
   loadWifiCredentials();
   if (!hasStoredWifi) {

@@ -22,6 +22,8 @@ The Oracle VM is the public rendezvous/broker point. The ESP32 never requires in
 - ESP32 connects to Wi-Fi and keeps an outbound broker connection alive.
 - Browser can send throttle/steering control messages.
 - ESP32 receives control packets and reports status back.
+- Steering servo now works on the XIAO board using `ESP32Servo` on `GPIO3`.
+- Camera initialization should stay ahead of actuator initialization.
 
 ### Video Path
 
@@ -86,6 +88,7 @@ The next session should execute these in order:
 5. Review and confirm the hardware pin map document
    - use `PINMAP.md` as the current reference
    - confirm the recommended TB6612FNG, servo, LED, and MAX98357A assignments
+   - servo is currently `GPIO3` via `ESP32Servo`
    - keep the motor plan aligned to the 3-pin drive layout: `1 PWM + 2 direction pins`
    - treat `GPIO9` as optional spare / standby only if needed
 
@@ -106,7 +109,7 @@ The next conversation should focus on:
 2. Finalize motor/servo pin mapping and hardware control
    - TB6612FNG motor driver pins
    - PWM channel assignment
-   - steering servo pin
+   - steering servo pin (`GPIO3`, `ESP32Servo`)
    - standby pin
    - failsafe stop behavior
 
