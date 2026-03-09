@@ -327,15 +327,15 @@ void initActuators() {
 }
 
 void runServoSelfTest() {
-  Serial.println("[SERVO] self-test start");
+  Serial.println("[SERVO] self-test legacy");
   writeSteeringOutput(0);
-  delay(350);
+  delay(400);
   writeSteeringOutput(-100);
-  delay(350);
+  delay(700);
   writeSteeringOutput(100);
-  delay(350);
+  delay(700);
   writeSteeringOutput(0);
-  delay(350);
+  delay(700);
   Serial.println("[SERVO] self-test end");
 }
 
@@ -365,7 +365,7 @@ void writeMotorOutput(int throttle) {
 void writeSteeringOutput(int steering) {
   int servoAngle = map(steering, -100, 100, 180, 35);
   servoAngle = constrain(servoAngle, 0, 180);
-  uint32_t duty = ((1UL << SERVO_PWM_RES_BITS) - 1UL) * static_cast<uint32_t>(servoAngle) / 180UL;
+  uint32_t duty = (8191UL * static_cast<uint32_t>(servoAngle)) / 180UL;
   ledcWrite(SERVO_PWM_PIN, duty);
 }
 
