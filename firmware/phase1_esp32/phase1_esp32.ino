@@ -532,7 +532,9 @@ void startHttpServer() {
   cameraServer.on("/api/control", HTTP_POST, handleControlJson);
   cameraServer.on("/api/config", HTTP_POST, handleConfigSave);
   cameraServer.on("/jpg", HTTP_GET, handleJpeg);
-  cameraServer.on("/stream", HTTP_GET, handleStream);
+  if (!apMode) {
+    cameraServer.on("/stream", HTTP_GET, handleStream);
+  }
   cameraServer.begin();
   serverStarted = true;
   cameraServerStarted = true;
@@ -553,13 +555,11 @@ void handleRoot() {
     html += " / password: ";
     html += AP_PASSWORD;
     html += "</div>";
-    html += "<img class='stream' src='/stream'>";
-    html += "<div class='pill'>Camera preview: /stream</div>";
     html += "<form class='stack' method='post' action='/api/config'>";
     html += "<input name='ssid' placeholder='Wi-Fi SSID' required value='";
     html += activeWifiSsid;
     html += "'>";
-    html += "<input name='password' placeholder='Wi-Fi Password' type='password'>";
+    html += "<input name='password' placeholder='Wi-Fi Password (leave blank to keep current)' type='password'>";
     html += "<input name='brokerHost' placeholder='Broker Host/IP' value='";
     html += activeBrokerHost;
     html += "'>";
@@ -645,6 +645,9 @@ void handleConfigSave() {
 
   if (ssid.length() == 0) {
     ssid = activeWifiSsid;
+  }
+  if (password.length() == 0) {
+    password = activeWifiPassword;
   }
   if (brokerHost.length() == 0) {
     brokerHost = activeBrokerHost;
@@ -995,10 +998,10 @@ void setup() {
   loadWifiCredentials();
   if (!hasStoredWifi) {
     startProvisioningAp();
-    startHttpServer();
   } else {
     ensureWifiConnected();
   }
+  startHttpServer();
 }
 
 void loop() {
