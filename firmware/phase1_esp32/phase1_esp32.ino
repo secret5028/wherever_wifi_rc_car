@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include <libb64/cencode.h>
 #include <Preferences.h>
+#include <ESP32Servo.h>
 #include "esp_camera.h"
 
 #include "secrets.h"
@@ -19,6 +20,7 @@ WebSocketsClient ws;
 WebServer cameraServer(80);
 I2SClass microphone;
 Preferences preferences;
+Servo steeringServo;
 
 constexpr unsigned long WIFI_RETRY_MS = 5000;
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -101,7 +103,6 @@ constexpr int MOTOR_DIR2_PIN = 6;
 constexpr int STATUS_LED_PIN = 43;
 constexpr int BATTERY_SENSE_PIN = 1;
 constexpr uint8_t MOTOR_PWM_CHANNEL = 2;
-constexpr uint8_t SERVO_PWM_CHANNEL = 4;
 constexpr uint32_t MOTOR_PWM_FREQ_HZ = 200;
 constexpr uint8_t MOTOR_PWM_RES_BITS = 12;
 constexpr uint32_t SERVO_PWM_FREQ_HZ = 50;
@@ -152,7 +153,6 @@ void writeSteeringOutput(int steering);
 void setLedState(bool enabled);
 void applyCameraQuality(const char* quality);
 void initActuators();
-void runServoSelfTest();
 bool loadWifiCredentials();
 void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId);
 void startProvisioningAp();
@@ -317,8 +317,8 @@ void initActuators() {
   ledcAttachChannel(MOTOR_PWM_PIN, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS, MOTOR_PWM_CHANNEL);
   ledcWriteChannel(MOTOR_PWM_CHANNEL, 0);
 
-  ledcAttachChannel(SERVO_PWM_PIN, SERVO_PWM_FREQ_HZ, SERVO_PWM_RES_BITS, SERVO_PWM_CHANNEL);
-  writeSteeringOutput(0);
+  steeringServo.setPeriodHertz(SERVO_PWM_FREQ_HZ);
+  steeringServo.attach(SERVO_PWM_PIN, 500, 2500);
 
   if (STATUS_LED_PIN >= 0) {
     pinMode(STATUS_LED_PIN, OUTPUT);
@@ -326,19 +326,6 @@ void initActuators() {
   }
 
   analogReadResolution(12);
-}
-
-void runServoSelfTest() {
-  Serial.println("[SERVO] self-test legacy");
-  writeSteeringOutput(0);
-  delay(400);
-  writeSteeringOutput(-100);
-  delay(700);
-  writeSteeringOutput(100);
-  delay(700);
-  writeSteeringOutput(0);
-  delay(700);
-  Serial.println("[SERVO] self-test end");
 }
 
 void writeMotorOutput(int throttle) {
@@ -367,8 +354,7 @@ void writeMotorOutput(int throttle) {
 void writeSteeringOutput(int steering) {
   int servoAngle = map(steering, -100, 100, 180, 35);
   servoAngle = constrain(servoAngle, 0, 180);
-  uint32_t duty = (8191UL * static_cast<uint32_t>(servoAngle)) / 180UL;
-  ledcWriteChannel(SERVO_PWM_CHANNEL, duty);
+  steeringServo.write(servoAngle);
 }
 
 void setLedState(bool enabled) {
@@ -1026,10 +1012,9 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n[BOOT] Phase 1 firmware");
-  initActuators();
-  runServoSelfTest();
   safeStop();
   cameraReady = initCamera();
+  initActuators();
   microphoneReady = initMicrophone();
   configureWebSocket();
   loadWifiCredentials();
