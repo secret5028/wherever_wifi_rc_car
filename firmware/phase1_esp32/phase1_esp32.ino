@@ -31,6 +31,7 @@ constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr uint8_t MAX_PING_FAILS = 3;
+constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 1;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
 constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
@@ -77,6 +78,7 @@ int8_t audioAdpcmStepIndex = 0;
 
 constexpr int CAM_PIN_PWDN = -1;
 constexpr int CAM_PIN_RESET = -1;
+constexpr int AP_TRIGGER_PIN = 0;
 constexpr int CAM_PIN_XCLK = 10;
 constexpr int CAM_PIN_SIOD = 40;
 constexpr int CAM_PIN_SIOC = 39;
@@ -910,7 +912,7 @@ void ensureWifiConnected() {
       wifiConnectInFlight = false;
       lastWifiAttemptAt = current;
       wifiFailureCount++;
-      if (wifiFailureCount >= 3) {
+      if (wifiFailureCount >= WIFI_FAILURES_BEFORE_AP) {
         Serial.println("[WIFI] falling back to AP mode");
         startProvisioningAp();
       }
@@ -990,13 +992,18 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n[BOOT] Phase 1 firmware");
+  pinMode(AP_TRIGGER_PIN, INPUT_PULLUP);
   initActuators();
   safeStop();
   cameraReady = initCamera();
   microphoneReady = initMicrophone();
   configureWebSocket();
+  bool forceAp = digitalRead(AP_TRIGGER_PIN) == LOW;
   loadWifiCredentials();
-  if (!hasStoredWifi) {
+  if (forceAp) {
+    Serial.println("[BOOT] AP mode triggered by pin");
+    startProvisioningAp();
+  } else if (!hasStoredWifi) {
     startProvisioningAp();
   } else {
     ensureWifiConnected();
