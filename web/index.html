@@ -302,7 +302,9 @@
 
 <script>
 const brokerUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/client`;
-const deviceId = "rc-car-01";
+const defaultDeviceId = "rc-car-01";
+const queryDeviceId = new URLSearchParams(location.search).get("deviceId");
+let deviceId = (queryDeviceId && queryDeviceId.trim()) || defaultDeviceId;
 const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 
 let ws;
@@ -369,6 +371,10 @@ function sendCtrl(throttle, steering) {
   });
 }
 
+function getRemoteVideoUrl(id) {
+  return `${location.origin}/video/${encodeURIComponent(id)}`;
+}
+
 function setStreamUrl(nextUrl) {
   if (nextUrl === streamUrl) {
     return;
@@ -407,19 +413,30 @@ function connectWS() {
 
 function handleMessage(message) {
   if (message.type === "welcome") {
-    connLabel.textContent = Array.isArray(message.devices) && message.devices.includes(deviceId)
-      ? "device online"
-      : "connected";
+    if (Array.isArray(message.devices) && message.devices.length > 0) {
+      if (!message.devices.includes(deviceId)) {
+        // Follow the first online device when the preferred id is unavailable.
+        deviceId = message.devices[0];
+      }
+      connLabel.textContent = "device online";
+      setStreamUrl(getRemoteVideoUrl(deviceId));
+    } else {
+      connLabel.textContent = "connected";
+    }
     return;
   }
 
-  if (message.type === "device_online" && message.deviceId === deviceId) {
-    connLabel.textContent = "device online";
+  if (message.type === "device_online") {
+    if (message.deviceId === deviceId) {
+      connLabel.textContent = "device online";
+      setStreamUrl(getRemoteVideoUrl(deviceId));
+    }
     return;
   }
 
   if (message.type === "device_offline" && message.deviceId === deviceId) {
     connLabel.textContent = "device offline";
+    setStreamUrl("");
     return;
   }
 
