@@ -95,7 +95,7 @@ constexpr int CAM_PIN_PCLK = 13;
 constexpr int MIC_PIN_CLK = 42;
 constexpr int MIC_PIN_DATA = 41;
 constexpr int MOTOR_PWM_PIN = 2;
-constexpr int SERVO_PWM_PIN = 4;
+constexpr int SERVO_PWM_PIN = 7;
 constexpr int MOTOR_DIR1_PIN = 5;
 constexpr int MOTOR_DIR2_PIN = 6;
 constexpr int STATUS_LED_PIN = 43;
@@ -150,6 +150,7 @@ void writeSteeringOutput(int steering);
 void setLedState(bool enabled);
 void applyCameraQuality(const char* quality);
 void initActuators();
+void runServoSelfTest();
 bool loadWifiCredentials();
 void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId);
 void startProvisioningAp();
@@ -325,6 +326,19 @@ void initActuators() {
   analogReadResolution(12);
 }
 
+void runServoSelfTest() {
+  Serial.println("[SERVO] self-test start");
+  writeSteeringOutput(0);
+  delay(350);
+  writeSteeringOutput(-100);
+  delay(350);
+  writeSteeringOutput(100);
+  delay(350);
+  writeSteeringOutput(0);
+  delay(350);
+  Serial.println("[SERVO] self-test end");
+}
+
 void writeMotorOutput(int throttle) {
   // Preserve the older car tuning: UI sends -100..100, legacy drive code used -90..90.
   int legacyThrottle = map(throttle, -100, 100, -90, 90);
@@ -349,10 +363,9 @@ void writeMotorOutput(int throttle) {
 }
 
 void writeSteeringOutput(int steering) {
-  // Match the older steering calibration rather than a generic centered servo map.
-  int legacySteering = map(steering, -100, 100, -90, 90);
-  int servoValue = map(legacySteering, -90, 90, 128, 55);
-  uint32_t duty = (8191U * static_cast<uint32_t>(servoValue)) / 180U;
+  int servoAngle = map(steering, -100, 100, 180, 35);
+  servoAngle = constrain(servoAngle, 0, 180);
+  uint32_t duty = ((1UL << SERVO_PWM_RES_BITS) - 1UL) * static_cast<uint32_t>(servoAngle) / 180UL;
   ledcWrite(SERVO_PWM_PIN, duty);
 }
 
@@ -1013,6 +1026,7 @@ void setup() {
   delay(500);
   Serial.println("\n[BOOT] Phase 1 firmware");
   initActuators();
+  runServoSelfTest();
   safeStop();
   cameraReady = initCamera();
   microphoneReady = initMicrophone();
