@@ -45,7 +45,13 @@
 - `PWM`: `GPIO2`
 - `AIN1 / DIR1`: `GPIO5`
 - `AIN2 / DIR2`: `GPIO6`
-- `STBY`: `GPIO9`
+
+Motor control is intentionally planned around the user's previous 3-pin pattern:
+
+- `1 x PWM`
+- `2 x direction pins`
+
+`GPIO9` remains free as an optional standby or spare control pin, but it is not required for the base motor drive plan.
 
 ### Steering Servo
 
@@ -67,7 +73,7 @@ The current board and firmware layout can support:
 
 - camera
 - microphone
-- DC motor output
+- DC motor output with a 3-pin motor drive layout
 - steering servo
 - status LED
 - one MAX98357A-class I2S amp module

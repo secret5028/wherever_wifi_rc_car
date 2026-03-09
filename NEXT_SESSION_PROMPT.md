@@ -86,7 +86,8 @@ The next session should execute these in order:
 5. Review and confirm the hardware pin map document
    - use `PINMAP.md` as the current reference
    - confirm the recommended TB6612FNG, servo, LED, and MAX98357A assignments
-   - decide whether `GPIO9` will be reserved for TB6612FNG `STBY`
+   - keep the motor plan aligned to the 3-pin drive layout: `1 PWM + 2 direction pins`
+   - treat `GPIO9` as optional spare / standby only if needed
 
 6. If remote web still shows the old layout, treat that as a deployment issue first
    - do not debug frontend behavior before confirming the VM is serving the new files
