@@ -41,6 +41,15 @@ The Oracle VM is the public rendezvous/broker point. The ESP32 never requires in
   - ESP32 encodes
   - browser decodes
   - broker relays
+- MAX98357A amp wiring on the XIAO has been hardware-verified with a boot tone:
+  - `BCLK = GPIO7`
+  - `LRC/WS = GPIO8`
+  - `DIN = GPIO4`
+- Browser-to-board PTT downlink code has been added locally and pushed, but it is not working end to end on the public service yet.
+- Latest serial check proved:
+  - `talk` control messages reach the ESP32
+  - `talk_audio` payloads do not reach the ESP32
+  - the first suspect is still Oracle VM broker/web deployment
 - Audio currently uses `16kHz IMA ADPCM`.
 - Latest tuning that the user considered acceptable:
   - reduced video burden
@@ -71,6 +80,7 @@ The next session should execute these in order:
    - use the company PC or Oracle console recovery path if needed
    - `cd ~/rc-car && git pull origin main`
    - restart the Node broker process and confirm startup logs
+   - this step is mandatory before debugging browser-to-board PTT audio further
 
 2. Verify the mobile browser UI on a real phone
    - portrait layout should fill the screen with no top/bottom empty margins
@@ -94,6 +104,13 @@ The next session should execute these in order:
 
 6. If remote web still shows the old layout, treat that as a deployment issue first
    - do not debug frontend behavior before confirming the VM is serving the new files
+
+7. Re-test browser-to-board PTT after Oracle VM deployment
+   - expected ESP32 serial:
+     - `[TALK] on`
+     - `[SPK] talk_audio seq=... samples=... b64=...`
+   - if only `[TALK] on/off` appears, the issue is still upstream of the ESP32
+   - if `talk_audio` reaches the ESP32 but no sound comes out, then debug the decode/playback path
 
 ## Next Session Main Tasks
 

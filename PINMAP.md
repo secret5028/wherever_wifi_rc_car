@@ -83,4 +83,8 @@ Notes:
 
 - Steering is now confirmed working on `GPIO3` when driven through `ESP32Servo`.
 - Camera should initialize before actuator setup so servo control is not disturbed by camera startup.
-- Speaker playback still requires firmware implementation even though the amp pin budget is available.
+- MAX98357A wiring has been hardware-verified with a boot tone on:
+  - `GPIO7` `BCLK`
+  - `GPIO8` `LRC/WS`
+  - `GPIO4` `DIN`
+- Browser-to-board PTT playback code exists, but public end-to-end validation still depends on Oracle VM broker/web deployment.

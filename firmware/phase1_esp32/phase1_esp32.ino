@@ -77,6 +77,7 @@ uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
 int lastSteering = 0;
 uint32_t audioSequence = 0;
+uint32_t talkAudioSequence = 0;
 int32_t audioHighpassState = 0;
 int32_t audioHighpassLastInput = 0;
 int16_t audioAdpcmPredictor = 0;
@@ -176,6 +177,7 @@ void handleControlJson();
 void handleConfigSave();
 void handleJpeg();
 void handleStream();
+void playSpeakerBootTone();
 size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
 size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
 void playSpeakerSamples(const int16_t* samples, size_t sampleCount);
@@ -186,6 +188,34 @@ void safeStop() {
   writeMotorOutput(0);
   writeSteeringOutput(0);
   Serial.println("[SAFE] stop");
+}
+
+void playSpeakerBootTone() {
+  if (!speakerReady) {
+    return;
+  }
+
+  constexpr int16_t amplitude = 2800;
+  constexpr uint32_t toneHz = 880;
+  constexpr size_t sampleCount = AUDIO_PLAYBACK_SAMPLE_RATE / 12;
+  int16_t sample = amplitude;
+  uint32_t halfWaveSamples = AUDIO_PLAYBACK_SAMPLE_RATE / (toneHz * 2);
+  if (halfWaveSamples == 0) {
+    halfWaveSamples = 1;
+  }
+
+  for (size_t i = 0; i < sampleCount; ++i) {
+    if ((i % halfWaveSamples) == 0) {
+      sample = -sample;
+    }
+    uint8_t frame[4] = {
+      static_cast<uint8_t>(sample & 0xff),
+      static_cast<uint8_t>((sample >> 8) & 0xff),
+      static_cast<uint8_t>(sample & 0xff),
+      static_cast<uint8_t>((sample >> 8) & 0xff)
+    };
+    speaker.write(frame, sizeof(frame));
+  }
 }
 
 bool loadWifiCredentials() {
@@ -466,6 +496,10 @@ void configureWebSocket() {
             return;
           }
           const char* payloadBase64 = doc["payload"] | "";
+          Serial.printf("[SPK] talk_audio seq=%lu samples=%u b64=%u\n",
+            static_cast<unsigned long>(doc["seq"] | 0),
+            static_cast<unsigned>(doc["samples"] | 0),
+            static_cast<unsigned>(strlen(payloadBase64)));
           size_t decodedLen = decodeBase64Payload(payloadBase64, audioDecodeBuffer, sizeof(audioDecodeBuffer));
           if (decodedLen == 0) {
             Serial.println("[SPK] base64 decode failed");
@@ -479,6 +513,7 @@ void configureWebSocket() {
             return;
           }
           playSpeakerSamples(audioPlaybackBuffer, pcmSamples);
+          talkAudioSequence++;
         } else if (strcmp(messageType, "camera_quality") == 0) {
           applyCameraQuality(doc["quality"] | "QVGA");
         } else if (strcmp(messageType, "snapshot") == 0) {
@@ -1121,6 +1156,7 @@ void setup() {
   initActuators();
   microphoneReady = initMicrophone();
   speakerReady = initSpeaker();
+  playSpeakerBootTone();
   configureWebSocket();
   loadWifiCredentials();
   if (!hasStoredWifi) {

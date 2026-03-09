@@ -400,7 +400,8 @@ const talkAudioState = {
   muteGain: null,
   pendingSamples: [],
   seq: 0,
-  stepIndex: 0
+  stepIndex: 0,
+  sentChunks: 0
 };
 
 function setButtonState(button, active) {
@@ -652,6 +653,7 @@ async function talkStart() {
     return;
   }
   talkOn = true;
+  talkAudioState.sentChunks = 0;
   setButtonState(btnTalk, true);
   send({
     type: "talk",
@@ -891,6 +893,14 @@ function flushTalkSamples(force = false) {
       seq: talkAudioState.seq++,
       payload: encodeBytesToBase64(encoded)
     });
+    talkAudioState.sentChunks += 1;
+    if ((talkAudioState.sentChunks % 10) === 1) {
+      console.log("[TALK_AUDIO] sent", {
+        chunks: talkAudioState.sentChunks,
+        seq: talkAudioState.seq - 1,
+        samples: chunk.length
+      });
+    }
   }
 }
 
