@@ -198,6 +198,13 @@ bool loadWifiCredentials() {
     activeDeviceId = DEFAULT_DEVICE_ID;
   }
 
+  Serial.printf("[CFG] wifiSsidLen=%u wifiPassLen=%u brokerHost=%s brokerPort=%u deviceId=%s\n",
+    static_cast<unsigned>(activeWifiSsid.length()),
+    static_cast<unsigned>(activeWifiPassword.length()),
+    activeBrokerHost.c_str(),
+    activeBrokerPort,
+    activeDeviceId.c_str());
+
   hasStoredWifi = activeWifiSsid.length() > 0;
   return hasStoredWifi;
 }
@@ -216,6 +223,12 @@ void saveConfig(const String& ssid, const String& password, const String& broker
   activeBrokerPort = brokerPort;
   activeDeviceId = deviceId;
   hasStoredWifi = true;
+  Serial.printf("[CFG] saved wifiSsidLen=%u wifiPassLen=%u brokerHost=%s brokerPort=%u deviceId=%s\n",
+    static_cast<unsigned>(ssid.length()),
+    static_cast<unsigned>(password.length()),
+    brokerHost.c_str(),
+    brokerPort,
+    deviceId.c_str());
 }
 
 void startProvisioningAp() {
@@ -409,7 +422,8 @@ void configureWebSocket() {
         break;
       case WStype_DISCONNECTED:
         Serial.println("[WS] disconnected");
-        scheduleRestart("ws disconnected");
+        safeStop();
+        scheduleReconnect();
         break;
       case WStype_TEXT: {
         StaticJsonDocument<256> doc;
@@ -672,6 +686,7 @@ void handleConfigSave() {
 
   saveConfig(ssid, password, brokerHost, brokerPort, deviceId);
   cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Rebooting...</p></body></html>");
+  Serial.println("[CFG] reboot scheduled");
   restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
 }
 
@@ -945,7 +960,9 @@ void ensureWebSocketConnected() {
   if (wsConnectInFlight) {
     if (millis() - wsConnectStartedAt >= WS_CONNECT_TIMEOUT_MS) {
       Serial.println("[WS] connect timeout");
-      scheduleRestart("ws timeout");
+      safeStop();
+      ws.disconnect();
+      scheduleReconnect();
     }
     return;
   }
