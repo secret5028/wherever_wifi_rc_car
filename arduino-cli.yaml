@@ -3,9 +3,9 @@ board_manager:
     - https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
 directories:
-  data: C:\Users\AAA\Desktop\wherever_wifi_rc_car\.arduino\data
-  downloads: C:\Users\AAA\Desktop\wherever_wifi_rc_car\.arduino\downloads
-  user: C:\Users\AAA\Desktop\wherever_wifi_rc_car\.arduino\user
+  data: .arduino/data
+  downloads: .arduino/downloads
+  user: .arduino/user
 
 library:
   enable_unsafe_install: false

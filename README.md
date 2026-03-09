@@ -48,3 +48,17 @@ firmware/
 - The firmware is intentionally limited to Phase 1 scope: networking, heartbeat, reconnect, command reception, and safe-stop behavior.
 - Motor and servo drive hooks are already present, but hardware tuning belongs to the next step after the end-to-end control path is verified.
 - Confirmed progress and environment decisions are tracked in `WORKLOG.md`.
+
+## Local Bootstrap
+
+From the repository root:
+
+```powershell
+.\scripts\bootstrap.ps1
+```
+
+Optional dependency install for broker:
+
+```powershell
+.\scripts\bootstrap.ps1 -InstallBrokerDeps
+```

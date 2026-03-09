@@ -109,11 +109,17 @@ constexpr int STEERING_MAX_US = 1900;
 constexpr char PREF_NAMESPACE[] = "rc-car";
 constexpr char PREF_WIFI_SSID[] = "wifi_ssid";
 constexpr char PREF_WIFI_PASS[] = "wifi_pass";
+constexpr char PREF_BROKER_HOST[] = "broker_host";
+constexpr char PREF_BROKER_PORT[] = "broker_port";
+constexpr char PREF_DEVICE_ID[] = "device_id";
 constexpr char AP_SSID[] = "RC-Car-Setup";
 constexpr char AP_PASSWORD[] = "12345678";
 
 String activeWifiSsid;
 String activeWifiPassword;
+String activeBrokerHost;
+uint16_t activeBrokerPort = BROKER_PORT;
+String activeDeviceId;
 
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
 uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
@@ -143,7 +149,7 @@ void setLedState(bool enabled);
 void applyCameraQuality(const char* quality);
 void initActuators();
 bool loadWifiCredentials();
-void saveWifiCredentials(const String& ssid, const String& password);
+void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId);
 void startProvisioningAp();
 void startHttpServer();
 uint32_t readBatteryMilliVolts();
@@ -168,24 +174,42 @@ bool loadWifiCredentials() {
   preferences.begin(PREF_NAMESPACE, true);
   activeWifiSsid = preferences.getString(PREF_WIFI_SSID, "");
   activeWifiPassword = preferences.getString(PREF_WIFI_PASS, "");
+  activeBrokerHost = preferences.getString(PREF_BROKER_HOST, "");
+  activeBrokerPort = preferences.getUShort(PREF_BROKER_PORT, 0);
+  activeDeviceId = preferences.getString(PREF_DEVICE_ID, "");
   preferences.end();
 
   if (activeWifiSsid.length() == 0 && strlen(WIFI_SSID) > 0) {
     activeWifiSsid = WIFI_SSID;
     activeWifiPassword = WIFI_PASSWORD;
   }
+  if (activeBrokerHost.length() == 0 && strlen(BROKER_HOST) > 0) {
+    activeBrokerHost = BROKER_HOST;
+  }
+  if (activeBrokerPort == 0) {
+    activeBrokerPort = static_cast<uint16_t>(BROKER_PORT);
+  }
+  if (activeDeviceId.length() == 0 && strlen(DEVICE_ID) > 0) {
+    activeDeviceId = DEVICE_ID;
+  }
 
   hasStoredWifi = activeWifiSsid.length() > 0;
   return hasStoredWifi;
 }
 
-void saveWifiCredentials(const String& ssid, const String& password) {
+void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId) {
   preferences.begin(PREF_NAMESPACE, false);
   preferences.putString(PREF_WIFI_SSID, ssid);
   preferences.putString(PREF_WIFI_PASS, password);
+  preferences.putString(PREF_BROKER_HOST, brokerHost);
+  preferences.putUShort(PREF_BROKER_PORT, brokerPort);
+  preferences.putString(PREF_DEVICE_ID, deviceId);
   preferences.end();
   activeWifiSsid = ssid;
   activeWifiPassword = password;
+  activeBrokerHost = brokerHost;
+  activeBrokerPort = brokerPort;
+  activeDeviceId = deviceId;
   hasStoredWifi = true;
 }
 
@@ -452,9 +476,19 @@ bool initCamera() {
   config.jpeg_quality = 14;
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+
+  Serial.printf("[CAM] psram=%s\n", psramFound() ? "yes" : "no");
 
   esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    // Fallback path for board/profile mismatches: force low-memory camera mode.
+    config.frame_size = FRAMESIZE_QQVGA;
+    config.jpeg_quality = 20;
+    config.fb_count = 1;
+    config.fb_location = CAMERA_FB_IN_DRAM;
+    err = esp_camera_init(&config);
+  }
   if (err != ESP_OK) {
     Serial.printf("[CAM] init failed: 0x%x\n", err);
     return false;
@@ -515,9 +549,22 @@ void handleRoot() {
     html += " / password: ";
     html += AP_PASSWORD;
     html += "</div>";
+    html += "<img class='stream' src='/stream'>";
+    html += "<div class='pill'>Camera preview: /stream</div>";
     html += "<form class='stack' method='post' action='/api/config'>";
-    html += "<input name='ssid' placeholder='Wi-Fi SSID' required>";
+    html += "<input name='ssid' placeholder='Wi-Fi SSID' required value='";
+    html += activeWifiSsid;
+    html += "'>";
     html += "<input name='password' placeholder='Wi-Fi Password' type='password'>";
+    html += "<input name='brokerHost' placeholder='Broker Host/IP' value='";
+    html += activeBrokerHost;
+    html += "'>";
+    html += "<input name='brokerPort' placeholder='Broker Port' type='number' min='1' max='65535' value='";
+    html += String(activeBrokerPort);
+    html += "'>";
+    html += "<input name='deviceId' placeholder='Device ID' value='";
+    html += activeDeviceId;
+    html += "'>";
     html += "<button type='submit'>Save And Reboot</button>";
     html += "</form></div>";
   } else {
@@ -583,15 +630,39 @@ void handleControlJson() {
 void handleConfigSave() {
   String ssid = cameraServer.arg("ssid");
   String password = cameraServer.arg("password");
+  String brokerHost = cameraServer.arg("brokerHost");
+  String brokerPortText = cameraServer.arg("brokerPort");
+  String deviceId = cameraServer.arg("deviceId");
   ssid.trim();
   password.trim();
+  brokerHost.trim();
+  brokerPortText.trim();
+  deviceId.trim();
 
   if (ssid.length() == 0) {
-    cameraServer.send(400, "text/plain", "ssid required");
+    ssid = activeWifiSsid;
+  }
+  if (brokerHost.length() == 0) {
+    brokerHost = activeBrokerHost;
+  }
+  if (deviceId.length() == 0) {
+    deviceId = activeDeviceId;
+  }
+
+  uint16_t brokerPort = activeBrokerPort;
+  if (brokerPortText.length() > 0) {
+    long parsedPort = brokerPortText.toInt();
+    if (parsedPort >= 1 && parsedPort <= 65535) {
+      brokerPort = static_cast<uint16_t>(parsedPort);
+    }
+  }
+
+  if (ssid.length() == 0 || brokerHost.length() == 0 || deviceId.length() == 0 || brokerPort == 0) {
+    cameraServer.send(400, "text/plain", "invalid config");
     return;
   }
 
-  saveWifiCredentials(ssid, password);
+  saveConfig(ssid, password, brokerHost, brokerPort, deviceId);
   cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Rebooting...</p></body></html>");
   restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
 }
@@ -797,7 +868,7 @@ void connectWebSocket() {
   }
 
   configureWebSocket();
-  ws.begin(BROKER_HOST, BROKER_PORT, String("/device?deviceId=") + DEVICE_ID);
+  ws.begin(activeBrokerHost.c_str(), activeBrokerPort, String("/device?deviceId=") + activeDeviceId);
   wsConnectStartedAt = millis();
   wsConnectInFlight = true;
 }
