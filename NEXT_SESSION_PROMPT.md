@@ -59,6 +59,37 @@ The Oracle VM is the public rendezvous/broker point. The ESP32 never requires in
 - Oracle VM broker is already running and the repo has been pushed to GitHub.
 - Confirmed progress is logged in `WORKLOG.md`.
 - Current main branch already contains the latest accepted state.
+- The current PC does not have the working Oracle VM SSH private key, so broker/web redeploy to the VM was not completed from this machine.
+
+## March 11 Tasks
+
+The next session should execute these in order:
+
+1. Deploy the latest `main` branch to the Oracle VM broker host
+   - use the company PC or Oracle console recovery path if needed
+   - `cd ~/rc-car && git pull origin main`
+   - restart the Node broker process and confirm startup logs
+
+2. Verify the mobile browser UI on a real phone
+   - portrait layout should fill the screen with no top/bottom empty margins
+   - confirm the controller page reflects the latest `web/index.html`
+
+3. Verify snapshot UX
+   - while streaming in `QVGA`, pressing `SNAP` should temporarily switch to `UXGA`
+   - snapshot should be captured after the temporary quality bump
+   - stream should return to the previous quality after the snapshot
+
+4. Verify signal display
+   - HUD label should be `SIG`
+   - signal should display as percent instead of raw RSSI dBm
+
+5. Review and confirm the hardware pin map document
+   - use `PINMAP.md` as the current reference
+   - confirm the recommended TB6612FNG, servo, LED, and MAX98357A assignments
+   - decide whether `GPIO9` will be reserved for TB6612FNG `STBY`
+
+6. If remote web still shows the old layout, treat that as a deployment issue first
+   - do not debug frontend behavior before confirming the VM is serving the new files
 
 ## Next Session Main Tasks
 
