@@ -114,6 +114,7 @@ constexpr char PREF_BROKER_PORT[] = "broker_port";
 constexpr char PREF_DEVICE_ID[] = "device_id";
 constexpr char AP_SSID[] = "RC-Car-Setup";
 constexpr char AP_PASSWORD[] = "12345678";
+constexpr char DEFAULT_DEVICE_ID[] = "rc-car-01";
 
 String activeWifiSsid;
 String activeWifiPassword;
@@ -191,6 +192,9 @@ bool loadWifiCredentials() {
   }
   if (activeDeviceId.length() == 0 && strlen(DEVICE_ID) > 0) {
     activeDeviceId = DEVICE_ID;
+  }
+  if (activeDeviceId.length() == 0) {
+    activeDeviceId = DEFAULT_DEVICE_ID;
   }
 
   hasStoredWifi = activeWifiSsid.length() > 0;
@@ -868,6 +872,10 @@ void connectWebSocket() {
   }
 
   configureWebSocket();
+  if (activeDeviceId.length() == 0) {
+    activeDeviceId = DEFAULT_DEVICE_ID;
+  }
+  Serial.printf("[WS] target=%s:%u deviceId=%s\n", activeBrokerHost.c_str(), activeBrokerPort, activeDeviceId.c_str());
   ws.begin(activeBrokerHost.c_str(), activeBrokerPort, String("/device?deviceId=") + activeDeviceId);
   wsConnectStartedAt = millis();
   wsConnectInFlight = true;
