@@ -78,7 +78,6 @@ int8_t audioAdpcmStepIndex = 0;
 
 constexpr int CAM_PIN_PWDN = -1;
 constexpr int CAM_PIN_RESET = -1;
-constexpr int AP_TRIGGER_PIN = 0;
 constexpr int CAM_PIN_XCLK = 10;
 constexpr int CAM_PIN_SIOD = 40;
 constexpr int CAM_PIN_SIOC = 39;
@@ -992,23 +991,18 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n[BOOT] Phase 1 firmware");
-  pinMode(AP_TRIGGER_PIN, INPUT_PULLUP);
   initActuators();
   safeStop();
   cameraReady = initCamera();
   microphoneReady = initMicrophone();
   configureWebSocket();
-  bool forceAp = digitalRead(AP_TRIGGER_PIN) == LOW;
   loadWifiCredentials();
-  if (forceAp) {
-    Serial.println("[BOOT] AP mode triggered by pin");
+  if (!hasStoredWifi) {
     startProvisioningAp();
-  } else if (!hasStoredWifi) {
-    startProvisioningAp();
+    startHttpServer();
   } else {
     ensureWifiConnected();
   }
-  startHttpServer();
 }
 
 void loop() {
