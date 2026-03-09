@@ -323,7 +323,6 @@
   </div>
 
   <div id="toolbar">
-    <button class="tb-btn" id="btn-view" type="button">VIEW</button>
     <button class="tb-btn" id="btn-led" type="button">Led1</button>
     <button class="tb-btn" id="btn-mode" type="button">MODE</button>
     <button class="tb-btn" id="btn-snap" type="button">SNAP</button>
@@ -358,8 +357,6 @@ let talkOn = false;
 let recOn = false;
 let streamUrl = "";
 let snapshotInFlight = false;
-let streamEnabled = false;
-let pendingStreamUrl = "";
 let wakeLockSentinel = null;
 
 const streamEl = document.getElementById("stream");
@@ -368,7 +365,6 @@ const batVal = document.getElementById("bat-val");
 const rssiVal = document.getElementById("rssi-val");
 const resLabel = document.getElementById("res-label");
 const modeLabel = document.getElementById("mode-label");
-const btnView = document.getElementById("btn-view");
 const btnLed = document.getElementById("btn-led");
 const btnMode = document.getElementById("btn-mode");
 const btnSnap = document.getElementById("btn-snap");
@@ -485,31 +481,6 @@ function setStreamUrl(nextUrl) {
   }
 }
 
-function stopVideoStream() {
-  streamEnabled = false;
-  setButtonState(btnView, false);
-  setStreamUrl("");
-}
-
-function refreshVideoStream() {
-  if (!streamEnabled || !pendingStreamUrl) {
-    setStreamUrl("");
-    return;
-  }
-  setStreamUrl(pendingStreamUrl);
-}
-
-function setPendingStreamUrl(nextUrl) {
-  pendingStreamUrl = nextUrl || "";
-  refreshVideoStream();
-}
-
-function toggleVideoStream() {
-  streamEnabled = !streamEnabled;
-  setButtonState(btnView, streamEnabled);
-  refreshVideoStream();
-}
-
 function connectWS() {
   ws = new WebSocket(brokerUrl);
   ws.onopen = () => {
@@ -519,7 +490,7 @@ function connectWS() {
   ws.onclose = () => {
     wsReady = false;
     connLabel.textContent = "reconnecting";
-    setPendingStreamUrl("");
+    setStreamUrl("");
     setTimeout(connectWS, 1500);
   };
   ws.onerror = () => {
@@ -542,7 +513,7 @@ function handleMessage(message) {
         deviceId = message.devices[0];
       }
       connLabel.textContent = "device online";
-      setPendingStreamUrl(getRemoteVideoUrl(deviceId));
+      setStreamUrl(getRemoteVideoUrl(deviceId));
     } else {
       connLabel.textContent = "connected";
     }
@@ -552,14 +523,14 @@ function handleMessage(message) {
   if (message.type === "device_online") {
     if (message.deviceId === deviceId) {
       connLabel.textContent = "device online";
-      setPendingStreamUrl(getRemoteVideoUrl(deviceId));
+      setStreamUrl(getRemoteVideoUrl(deviceId));
     }
     return;
   }
 
   if (message.type === "device_offline" && message.deviceId === deviceId) {
     connLabel.textContent = "device offline";
-    setPendingStreamUrl("");
+    setStreamUrl("");
     return;
   }
 
@@ -574,9 +545,9 @@ function handleMessage(message) {
     const sigPercent = signalPercentFromRssi(message.rssi);
     rssiVal.textContent = sigPercent !== null ? `${sigPercent}%` : "--%";
     if (message.remoteVideoUrl) {
-      setPendingStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
+      setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
     } else if (message.localIp && message.streamPath) {
-      setPendingStreamUrl(`http://${message.localIp}${message.streamPath}`);
+      setStreamUrl(`http://${message.localIp}${message.streamPath}`);
     }
     return;
   }
@@ -978,11 +949,6 @@ window.addEventListener("mouseup", () => {
   }
 });
 
-btnView.addEventListener("click", () => {
-  armAudioPlayback();
-  toggleVideoStream();
-});
-
 btnLed.addEventListener("click", () => {
   armAudioPlayback();
   toggleLed();
@@ -1013,15 +979,18 @@ btnRec.addEventListener("click", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    stopVideoStream();
+    setStreamUrl("");
     releaseWakeLock();
   } else {
     requestWakeLock();
+    if (deviceId) {
+      setStreamUrl(getRemoteVideoUrl(deviceId));
+    }
   }
 });
 
 window.addEventListener("pagehide", () => {
-  stopVideoStream();
+  setStreamUrl("");
   releaseWakeLock();
 });
 

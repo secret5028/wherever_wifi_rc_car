@@ -95,11 +95,13 @@ constexpr int CAM_PIN_PCLK = 13;
 constexpr int MIC_PIN_CLK = 42;
 constexpr int MIC_PIN_DATA = 41;
 constexpr int MOTOR_PWM_PIN = 2;
-constexpr int SERVO_PWM_PIN = 7;
+constexpr int SERVO_PWM_PIN = 3;
 constexpr int MOTOR_DIR1_PIN = 5;
 constexpr int MOTOR_DIR2_PIN = 6;
 constexpr int STATUS_LED_PIN = 43;
 constexpr int BATTERY_SENSE_PIN = 1;
+constexpr uint8_t MOTOR_PWM_CHANNEL = 2;
+constexpr uint8_t SERVO_PWM_CHANNEL = 4;
 constexpr uint32_t MOTOR_PWM_FREQ_HZ = 200;
 constexpr uint8_t MOTOR_PWM_RES_BITS = 12;
 constexpr uint32_t SERVO_PWM_FREQ_HZ = 50;
@@ -312,10 +314,10 @@ void initActuators() {
   digitalWrite(MOTOR_DIR1_PIN, LOW);
   digitalWrite(MOTOR_DIR2_PIN, LOW);
 
-  ledcAttach(MOTOR_PWM_PIN, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS);
-  ledcWrite(MOTOR_PWM_PIN, 0);
+  ledcAttachChannel(MOTOR_PWM_PIN, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS, MOTOR_PWM_CHANNEL);
+  ledcWriteChannel(MOTOR_PWM_CHANNEL, 0);
 
-  ledcAttach(SERVO_PWM_PIN, SERVO_PWM_FREQ_HZ, SERVO_PWM_RES_BITS);
+  ledcAttachChannel(SERVO_PWM_PIN, SERVO_PWM_FREQ_HZ, SERVO_PWM_RES_BITS, SERVO_PWM_CHANNEL);
   writeSteeringOutput(0);
 
   if (STATUS_LED_PIN >= 0) {
@@ -359,14 +361,14 @@ void writeMotorOutput(int throttle) {
     digitalWrite(MOTOR_DIR2_PIN, LOW);
   }
 
-  ledcWrite(MOTOR_PWM_PIN, duty);
+  ledcWriteChannel(MOTOR_PWM_CHANNEL, duty);
 }
 
 void writeSteeringOutput(int steering) {
   int servoAngle = map(steering, -100, 100, 180, 35);
   servoAngle = constrain(servoAngle, 0, 180);
   uint32_t duty = (8191UL * static_cast<uint32_t>(servoAngle)) / 180UL;
-  ledcWrite(SERVO_PWM_PIN, duty);
+  ledcWriteChannel(SERVO_PWM_CHANNEL, duty);
 }
 
 void setLedState(bool enabled) {
