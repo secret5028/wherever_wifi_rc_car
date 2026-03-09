@@ -636,7 +636,6 @@ void handleStatusJson() {
   doc["ledEnabled"] = ledEnabled;
   doc["throttle"] = lastThrottle;
   doc["steering"] = lastSteering;
-
   String payload;
   serializeJson(doc, payload);
   cameraServer.send(200, "application/json", payload);
