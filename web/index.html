@@ -26,30 +26,36 @@
     touch-action: manipulation;
   }
 
+  html,
+  body {
+    min-height: 100%;
+  }
+
   body {
     background: #3a7bd5;
-    display: flex;
-    justify-content: center;
-    align-items: center;
     min-height: 100vh;
     font-family: "Share Tech Mono", monospace;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right)
-      env(safe-area-inset-bottom) env(safe-area-inset-left);
+    overflow: hidden;
   }
 
   #app {
-    width: min(420px, 100vw);
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    min-height: 100vh;
     background: var(--bg);
-    border-radius: 16px;
+    border-radius: 0;
     overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
   }
 
   #stream-wrap {
     position: relative;
     width: 100%;
-    height: 260px;
+    flex: 0 0 38dvh;
+    min-height: 220px;
     background: #0a0a1a;
     overflow: hidden;
     display: flex;
@@ -180,7 +186,11 @@
 
   #control-panel {
     background: #1e1e2e;
-    padding: 10px 10px 14px;
+    padding: 10px 10px calc(14px + env(safe-area-inset-bottom));
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   #mode-label {
@@ -194,7 +204,8 @@
 
   #joystick-outer {
     width: 100%;
-    height: 220px;
+    flex: 1 1 auto;
+    min-height: 220px;
     background: #111122;
     border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.07);
@@ -263,6 +274,36 @@
     box-shadow: inset 0 0 0 2px var(--green);
     color: var(--green);
   }
+
+  @media (min-width: 768px) {
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+      overflow: auto;
+    }
+
+    #app {
+      position: relative;
+      inset: auto;
+      width: min(420px, 100vw);
+      min-height: min(900px, calc(100dvh - 40px));
+      height: min(900px, calc(100dvh - 40px));
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    #stream-wrap {
+      flex-basis: 260px;
+      min-height: 260px;
+    }
+
+    #joystick-outer {
+      min-height: 220px;
+    }
+  }
 </style>
 </head>
 <body>
@@ -272,7 +313,7 @@
     <div id="hud">
       <div id="hud-left">
         <span>BAT : <span class="bat-val" id="bat-val">--%</span></span>
-        <span>RSSI : <span class="rssi-val" id="rssi-val">-- dBm</span></span>
+        <span>SIG : <span class="rssi-val" id="rssi-val">--%</span></span>
       </div>
       <div id="hud-right" onclick="cycleResolution()">
         <span id="res-label">QVGA</span><br>
@@ -315,6 +356,7 @@ let ledOn = false;
 let talkOn = false;
 let recOn = false;
 let streamUrl = "";
+let snapshotInFlight = false;
 
 const streamEl = document.getElementById("stream");
 const connLabel = document.getElementById("conn-label");
@@ -360,6 +402,31 @@ function send(payload) {
   }
   ws.send(JSON.stringify(payload));
   return true;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function signalPercentFromRssi(rssi) {
+  if (typeof rssi !== "number") {
+    return null;
+  }
+  const percent = Math.round(((rssi + 100) / 50) * 100);
+  return Math.max(0, Math.min(100, percent));
+}
+
+function requestQuality(quality) {
+  const nextIdx = qualityList.indexOf(quality);
+  if (nextIdx >= 0) {
+    resIdx = nextIdx;
+    resLabel.textContent = quality;
+  }
+  return send({
+    type: "camera_quality",
+    deviceId,
+    quality
+  });
 }
 
 function sendCtrl(throttle, steering) {
@@ -448,7 +515,8 @@ function handleMessage(message) {
     } else {
       batVal.textContent = "--";
     }
-    rssiVal.textContent = message.rssi !== undefined ? `${message.rssi} dBm` : "-- dBm";
+    const sigPercent = signalPercentFromRssi(message.rssi);
+    rssiVal.textContent = sigPercent !== null ? `${sigPercent}%` : "--%";
     if (message.remoteVideoUrl) {
       setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
     } else if (message.localIp && message.streamPath) {
@@ -463,14 +531,7 @@ function handleMessage(message) {
 }
 
 function cycleResolution() {
-  resIdx = (resIdx + 1) % qualityList.length;
-  const value = qualityList[resIdx];
-  resLabel.textContent = value;
-  send({
-    type: "camera_quality",
-    deviceId,
-    quality: value
-  });
+  requestQuality(qualityList[(resIdx + 1) % qualityList.length]);
 }
 
 function toggleMode() {
@@ -494,14 +555,24 @@ function toggleLed() {
   });
 }
 
-function doSnap() {
+async function doSnap() {
+  if (snapshotInFlight) {
+    return;
+  }
+  snapshotInFlight = true;
   btnSnap.classList.add("active");
-  setTimeout(() => btnSnap.classList.remove("active"), 180);
+  const restoreQuality = qualityList[resIdx];
 
   try {
     if (!streamEl.src) {
       return;
     }
+
+    if (restoreQuality !== "UXGA") {
+      requestQuality("UXGA");
+      await wait(1400);
+    }
+
     snapshotCanvas.width = streamEl.naturalWidth || 1280;
     snapshotCanvas.height = streamEl.naturalHeight || 720;
     const ctx = snapshotCanvas.getContext("2d");
@@ -519,6 +590,12 @@ function doSnap() {
     }, "image/jpeg", 0.96);
   } catch (_) {
     // ignore browser snapshot failure
+  } finally {
+    if (restoreQuality !== "UXGA") {
+      requestQuality(restoreQuality);
+    }
+    snapshotInFlight = false;
+    window.setTimeout(() => btnSnap.classList.remove("active"), 180);
   }
 
   send({

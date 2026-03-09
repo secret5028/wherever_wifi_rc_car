@@ -662,7 +662,11 @@ void handleConfigSave() {
     ssid = activeWifiSsid;
   }
   if (password.length() == 0) {
-    password = activeWifiPassword;
+    if (activeWifiPassword.length() > 0) {
+      password = activeWifiPassword;
+    } else if (strlen(WIFI_PASSWORD) > 0) {
+      password = WIFI_PASSWORD;
+    }
   }
   if (brokerHost.length() == 0) {
     brokerHost = activeBrokerHost;
