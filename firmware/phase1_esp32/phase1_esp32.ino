@@ -124,15 +124,22 @@ constexpr char PREF_WIFI_PASS[] = "wifi_pass";
 constexpr char PREF_BROKER_HOST[] = "broker_host";
 constexpr char PREF_BROKER_PORT[] = "broker_port";
 constexpr char PREF_DEVICE_ID[] = "device_id";
+constexpr char PREF_WIFI_MEMORY[] = "wifi_memory";
+constexpr char PREF_CONNECT_ONCE[] = "connect_once";
 constexpr char AP_SSID[] = "RC-Car-Setup";
 constexpr char AP_PASSWORD[] = "12345678";
 constexpr char DEFAULT_DEVICE_ID[] = "rc-car-01";
+constexpr uint8_t MAX_REMEMBERED_WIFI = 5;
 
 String activeWifiSsid;
 String activeWifiPassword;
 String activeBrokerHost;
 uint16_t activeBrokerPort = BROKER_PORT;
 String activeDeviceId;
+String rememberedSsids[MAX_REMEMBERED_WIFI];
+String rememberedPasswords[MAX_REMEMBERED_WIFI];
+uint8_t rememberedWifiCount = 0;
+bool connectOnBoot = false;
 
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
 uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
@@ -166,6 +173,11 @@ void applyCameraQuality(const char* quality);
 void initActuators();
 bool loadWifiCredentials();
 void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId);
+void loadRememberedWifi();
+void saveRememberedWifi();
+void rememberWifiCredentials(const String& ssid, const String& password);
+String getRememberedPassword(const String& ssid);
+void setConnectOnBoot(bool enabled);
 void startProvisioningAp();
 void startHttpServer();
 uint32_t readBatteryMilliVolts();
@@ -225,6 +237,7 @@ bool loadWifiCredentials() {
   activeBrokerHost = preferences.getString(PREF_BROKER_HOST, "");
   activeBrokerPort = preferences.getUShort(PREF_BROKER_PORT, 0);
   activeDeviceId = preferences.getString(PREF_DEVICE_ID, "");
+  connectOnBoot = preferences.getBool(PREF_CONNECT_ONCE, false);
   preferences.end();
 
   if (activeWifiSsid.length() == 0 && strlen(WIFI_SSID) > 0) {
@@ -255,6 +268,124 @@ bool loadWifiCredentials() {
   return hasStoredWifi;
 }
 
+void loadRememberedWifi() {
+  rememberedWifiCount = 0;
+
+  preferences.begin(PREF_NAMESPACE, true);
+  String memoryJson = preferences.getString(PREF_WIFI_MEMORY, "");
+  preferences.end();
+
+  if (memoryJson.length() == 0) {
+    if (activeWifiSsid.length() > 0) {
+      rememberWifiCredentials(activeWifiSsid, activeWifiPassword);
+    }
+    return;
+  }
+
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc, memoryJson)) {
+    return;
+  }
+
+  JsonArray items = doc["items"].as<JsonArray>();
+  for (JsonObject item : items) {
+    if (rememberedWifiCount >= MAX_REMEMBERED_WIFI) {
+      break;
+    }
+    String ssid = String(item["ssid"] | "");
+    if (ssid.length() == 0) {
+      continue;
+    }
+    rememberedSsids[rememberedWifiCount] = ssid;
+    rememberedPasswords[rememberedWifiCount] = String(item["password"] | "");
+    rememberedWifiCount++;
+  }
+
+  if (rememberedWifiCount == 0 && activeWifiSsid.length() > 0) {
+    rememberWifiCredentials(activeWifiSsid, activeWifiPassword);
+  }
+}
+
+void saveRememberedWifi() {
+  StaticJsonDocument<512> doc;
+  JsonArray items = doc.createNestedArray("items");
+  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
+    JsonObject item = items.createNestedObject();
+    item["ssid"] = rememberedSsids[i];
+    item["password"] = rememberedPasswords[i];
+  }
+
+  String payload;
+  serializeJson(doc, payload);
+
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putString(PREF_WIFI_MEMORY, payload);
+  preferences.end();
+}
+
+void rememberWifiCredentials(const String& ssid, const String& password) {
+  if (ssid.length() == 0) {
+    return;
+  }
+
+  int existingIndex = -1;
+  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
+    if (rememberedSsids[i] == ssid) {
+      existingIndex = i;
+      break;
+    }
+  }
+
+  String nextPassword = password;
+  if (nextPassword.length() == 0 && existingIndex >= 0) {
+    nextPassword = rememberedPasswords[existingIndex];
+  }
+
+  if (existingIndex > 0) {
+    for (int i = existingIndex; i > 0; --i) {
+      rememberedSsids[i] = rememberedSsids[i - 1];
+      rememberedPasswords[i] = rememberedPasswords[i - 1];
+    }
+    rememberedSsids[0] = ssid;
+    rememberedPasswords[0] = nextPassword;
+  } else if (existingIndex == 0) {
+    rememberedPasswords[0] = nextPassword;
+  } else {
+    if (rememberedWifiCount < MAX_REMEMBERED_WIFI) {
+      for (int i = rememberedWifiCount; i > 0; --i) {
+        rememberedSsids[i] = rememberedSsids[i - 1];
+        rememberedPasswords[i] = rememberedPasswords[i - 1];
+      }
+      rememberedWifiCount++;
+    } else {
+      for (int i = MAX_REMEMBERED_WIFI - 1; i > 0; --i) {
+        rememberedSsids[i] = rememberedSsids[i - 1];
+        rememberedPasswords[i] = rememberedPasswords[i - 1];
+      }
+    }
+    rememberedSsids[0] = ssid;
+    rememberedPasswords[0] = nextPassword;
+  }
+
+  saveRememberedWifi();
+}
+
+String getRememberedPassword(const String& ssid) {
+  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
+    if (rememberedSsids[i] == ssid) {
+      return rememberedPasswords[i];
+    }
+  }
+  return "";
+}
+
+void setConnectOnBoot(bool enabled) {
+  connectOnBoot = enabled;
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putBool(PREF_CONNECT_ONCE, enabled);
+  preferences.end();
+}
+
 void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId) {
   preferences.begin(PREF_NAMESPACE, false);
   preferences.putString(PREF_WIFI_SSID, ssid);
@@ -275,6 +406,7 @@ void saveConfig(const String& ssid, const String& password, const String& broker
     brokerHost.c_str(),
     brokerPort,
     deviceId.c_str());
+  rememberWifiCredentials(ssid, password);
 }
 
 void startProvisioningAp() {
@@ -626,9 +758,7 @@ void startHttpServer() {
   cameraServer.on("/api/control", HTTP_POST, handleControlJson);
   cameraServer.on("/api/config", HTTP_POST, handleConfigSave);
   cameraServer.on("/jpg", HTTP_GET, handleJpeg);
-  if (!apMode) {
-    cameraServer.on("/stream", HTTP_GET, handleStream);
-  }
+  cameraServer.on("/stream", HTTP_GET, handleStream);
   cameraServer.begin();
   serverStarted = true;
   cameraServerStarted = true;
@@ -640,52 +770,80 @@ void handleRoot() {
   html += "<!doctype html><html><head><meta charset='utf-8'>";
   html += "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>";
   html += "<title>RC Car</title>";
-  html += "<style>body{font-family:sans-serif;margin:0;background:#111;color:#f4f4f4}main{max-width:720px;margin:0 auto;padding:16px}form,input,button{font:inherit}button{padding:12px 16px;border:0;border-radius:10px}input{padding:12px;border-radius:10px;border:1px solid #444;background:#1d1d1d;color:#fff;width:100%;box-sizing:border-box} .stack{display:grid;gap:12px} .panel{background:#1b1b1b;padding:16px;border-radius:16px} .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} .stream{width:100%;border-radius:16px;transform:scaleX(-1);background:#000} .controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px}.wide{grid-column:1/-1}.pill{font-size:14px;color:#9ad}</style></head><body><main>";
-
+  html += "<style>body{font-family:sans-serif;margin:0;background:#111;color:#f4f4f4}main{max-width:720px;margin:0 auto;padding:16px}form,input,button{font:inherit}button{padding:12px 16px;border:0;border-radius:10px;background:#2a2a2a;color:#fff}input{padding:12px;border-radius:10px;border:1px solid #444;background:#1d1d1d;color:#fff;width:100%;box-sizing:border-box}.stack{display:grid;gap:12px}.panel{background:#1b1b1b;padding:16px;border-radius:16px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.stream{width:100%;border-radius:16px;transform:scaleX(-1);background:#000}.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px}.wide{grid-column:1/-1}.pill{font-size:14px;color:#9ad}.muted{color:#aaa;font-size:13px}.hidden{display:none!important}.topbar{display:flex;gap:12px;align-items:center;justify-content:space-between}.setup{background:#375a7f}.accent{background:#185a36}</style></head><body><main>";
+  html += "<div class='panel stack'><div class='topbar'><h1>RC Car Control</h1><button type='button' class='setup' onclick='toggleSetup()'>";
+  html += apMode ? "Wi-Fi Setup" : "Network";
+  html += "</button></div>";
+  html += "<div id='status' class='pill'>connecting...</div>";
   if (apMode) {
-    html += "<div class='panel stack'><h1>Wi-Fi Setup</h1>";
-    html += "<div class='pill'>AP SSID: ";
-    html += AP_SSID;
-    html += " / password: ";
-    html += AP_PASSWORD;
-    html += "</div>";
-    html += "<form class='stack' method='post' action='/api/config'>";
-    html += "<input name='ssid' placeholder='Wi-Fi SSID' required value='";
-    html += activeWifiSsid;
-    html += "'>";
-    html += "<input name='password' placeholder='Wi-Fi Password (leave blank to keep current)' type='password'>";
-    html += "<input name='brokerHost' placeholder='Broker Host/IP' value='";
-    html += activeBrokerHost;
-    html += "'>";
-    html += "<input name='brokerPort' placeholder='Broker Port' type='number' min='1' max='65535' value='";
-    html += String(activeBrokerPort);
-    html += "'>";
-    html += "<input name='deviceId' placeholder='Device ID' value='";
-    html += activeDeviceId;
-    html += "'>";
-    html += "<button type='submit'>Save And Reboot</button>";
-    html += "</form></div>";
-  } else {
-    html += "<div class='panel stack'><h1>RC Car Control</h1>";
-    html += "<div id='status' class='pill'>connecting...</div>";
-    html += "<img class='stream' src='/stream'>";
-    html += "<div class='controls'>";
-    html += "<button onclick='send(100,0)' class='wide'>Forward</button>";
-    html += "<button onclick='send(0,-35)'>Left</button>";
-    html += "<button onclick='send(0,0)'>Stop</button>";
-    html += "<button onclick='send(0,35)'>Right</button>";
-    html += "<button onclick='send(-70,0)' class='wide'>Reverse</button>";
-    html += "</div>";
-    html += "<div class='stack'><label>Throttle <input id='throttle' type='range' min='-100' max='100' value='0'></label>";
-    html += "<label>Steering <input id='steering' type='range' min='-45' max='45' value='0'></label>";
-    html += "<div class='row'><button onclick='applySliders()'>Apply</button><button onclick='toggleLed()'>LED</button></div></div>";
-    html += "</div><script>";
-    html += "async function send(t,s){await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({throttle:t,steering:s})});}";
-    html += "function applySliders(){send(+throttle.value,+steering.value)}";
-    html += "let led=false; async function toggleLed(){led=!led; await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ledEnabled:led})});}";
-    html += "setInterval(async()=>{const r=await fetch('/api/status'); const j=await r.json(); status.textContent='IP '+j.ip+' | RSSI '+j.rssi+' dBm | BAT '+j.batteryMv+' mV | mode '+j.mode;},1500);";
-    html += "</script>";
+    html += "<div class='muted'>AP direct mode. Connect controls locally now, then save Wi-Fi to return to broker mode.</div>";
   }
+  html += "<img class='stream' src='/stream'>";
+  html += "<div class='controls'>";
+  html += "<button type='button' onclick='sendCtrl(100,0)' class='wide accent'>Forward</button>";
+  html += "<button type='button' onclick='sendCtrl(0,-35)'>Left</button>";
+  html += "<button type='button' onclick='sendCtrl(0,0)'>Stop</button>";
+  html += "<button type='button' onclick='sendCtrl(0,35)'>Right</button>";
+  html += "<button type='button' onclick='sendCtrl(-70,0)' class='wide'>Reverse</button>";
+  html += "</div>";
+  html += "<div class='stack'><label>Throttle <input id='throttle' type='range' min='-100' max='100' value='0'></label>";
+  html += "<label>Steering <input id='steering' type='range' min='-100' max='100' value='0'></label>";
+  html += "<div class='row'><button type='button' onclick='applySliders()'>Apply</button><button type='button' onclick='toggleLed()'>LED</button></div></div>";
+  html += "<div id='setup-panel' class='panel stack hidden'><h2>Wi-Fi Setup</h2>";
+  html += "<div class='pill'>AP SSID: ";
+  html += AP_SSID;
+  html += " / password: ";
+  html += AP_PASSWORD;
+  html += "</div>";
+  if (rememberedWifiCount > 0) {
+    html += "<label>Remembered Wi-Fi<select id='saved-ssid' onchange='applySavedWifi(this.value)'><option value=''>Select saved network</option>";
+    for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
+      html += "<option value='";
+      html += rememberedSsids[i];
+      html += "'>";
+      html += rememberedSsids[i];
+      html += "</option>";
+    }
+    html += "</select></label>";
+  }
+  html += "<form class='stack' method='post' action='/api/config'>";
+  html += "<input id='ssid-input' name='ssid' placeholder='Wi-Fi SSID' required value='";
+  html += activeWifiSsid;
+  html += "'>";
+  html += "<input id='password-input' name='password' placeholder='Wi-Fi Password (leave blank to keep current)' type='password'>";
+  html += "<input id='broker-host-input' name='brokerHost' placeholder='Broker Host/IP' value='";
+  html += activeBrokerHost;
+  html += "'>";
+  html += "<input id='broker-port-input' name='brokerPort' placeholder='Broker Port' type='number' min='1' max='65535' value='";
+  html += String(activeBrokerPort);
+  html += "'>";
+  html += "<input id='device-id-input' name='deviceId' placeholder='Device ID' value='";
+  html += activeDeviceId;
+  html += "'>";
+  html += "<button class='accent' type='submit'>Connect And Reboot</button>";
+  html += "</form></div>";
+  html += "</div><script>";
+  html += "const setupPanel=document.getElementById('setup-panel');const statusEl=document.getElementById('status');const throttleEl=document.getElementById('throttle');const steeringEl=document.getElementById('steering');const ssidInput=document.getElementById('ssid-input');const passwordInput=document.getElementById('password-input');let led=false;";
+  html += "const savedWifiPasswords={";
+  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
+    if (i > 0) {
+      html += ",";
+    }
+    html += "'";
+    html += rememberedSsids[i];
+    html += "':'";
+    html += rememberedPasswords[i];
+    html += "'";
+  }
+  html += "};";
+  html += "async function postJson(path,payload){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})}";
+  html += "async function sendCtrl(t,s){await postJson('/api/control',{throttle:t,steering:s})}";
+  html += "function applySliders(){sendCtrl(+throttleEl.value,+steeringEl.value)}";
+  html += "async function toggleLed(){led=!led; await postJson('/api/control',{ledEnabled:led})}";
+  html += "function toggleSetup(){setupPanel.classList.toggle('hidden')}";
+  html += "function applySavedWifi(ssid){if(!ssid){return;}ssidInput.value=ssid;if(savedWifiPasswords[ssid]!==undefined){passwordInput.value=savedWifiPasswords[ssid];}}";
+  html += "setInterval(async()=>{try{const r=await fetch('/api/status'); const j=await r.json(); led=!!j.ledEnabled; statusEl.textContent=(j.apMode?'AP ':'STA ')+j.ip+' | RSSI '+j.rssi+' dBm | BAT '+j.batteryPct+'% | mode '+j.mode+' | broker '+(j.wsConnected?'on':'off');}catch(_){statusEl.textContent='status unavailable';}},1500);";
+  html += "</script>";
 
   html += "</main></body></html>";
   cameraServer.send(200, "text/html", html);
@@ -702,6 +860,7 @@ void handleStatusJson() {
   doc["ledEnabled"] = ledEnabled;
   doc["throttle"] = lastThrottle;
   doc["steering"] = lastSteering;
+  doc["wsConnected"] = wsConnected;
   String payload;
   serializeJson(doc, payload);
   cameraServer.send(200, "application/json", payload);
@@ -740,7 +899,10 @@ void handleConfigSave() {
     ssid = activeWifiSsid;
   }
   if (password.length() == 0) {
-    if (activeWifiPassword.length() > 0) {
+    String rememberedPassword = getRememberedPassword(ssid);
+    if (rememberedPassword.length() > 0) {
+      password = rememberedPassword;
+    } else if (activeWifiPassword.length() > 0) {
       password = activeWifiPassword;
     } else if (strlen(WIFI_PASSWORD) > 0) {
       password = WIFI_PASSWORD;
@@ -767,8 +929,9 @@ void handleConfigSave() {
   }
 
   saveConfig(ssid, password, brokerHost, brokerPort, deviceId);
-  cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Rebooting...</p></body></html>");
-  Serial.println("[CFG] reboot scheduled");
+  setConnectOnBoot(true);
+  cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Connecting after reboot...</p></body></html>");
+  Serial.println("[CFG] connect + reboot scheduled");
   restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
 }
 
@@ -1159,11 +1322,13 @@ void setup() {
   playSpeakerBootTone();
   configureWebSocket();
   loadWifiCredentials();
-  if (!hasStoredWifi) {
+  loadRememberedWifi();
+  if (connectOnBoot && hasStoredWifi) {
+    setConnectOnBoot(false);
+    ensureWifiConnected();
+  } else {
     startProvisioningAp();
     startHttpServer();
-  } else {
-    ensureWifiConnected();
   }
 }
 
