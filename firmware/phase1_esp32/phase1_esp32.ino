@@ -196,7 +196,6 @@ void handleStream();
 void handleWifiScan();
 void handleWifiConnect();
 void handleTalkAudio();
-void handleCaptivePortal();
 void playSpeakerBootTone();
 size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
 size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
@@ -986,14 +985,6 @@ void handleTalkAudio() {
     playSpeakerSamples(audioPlaybackBuffer, pcmSamples);
   }
   cameraServer.send(200, "application/json", "{\"ok\":true}");
-}
-
-
-void handleCaptivePortal() {
-  String apIp = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
-  String location = String("http://") + apIp + "/";
-  cameraServer.sendHeader("Location", location);
-  cameraServer.send(302, "text/plain", "");
 }
 
 void handleWifiScan() {

@@ -407,8 +407,8 @@ const recorderState = { stream: null, recorder: null, chunks: [], renderTimer: n
 
 const audioState = {
   ctx: null, mixDestination: null, sampleRate: 16000,
-  enabled: false, nextPlayAt: 0, maxLeadSeconds: 0.24,
-  targetLeadSeconds: 0.05, lastSeqByDevice: new Map()
+  enabled: false, nextPlayAt: 0, maxLeadSeconds: 0.6,
+  targetLeadSeconds: 0.12, lastSeqByDevice: new Map(), activeSources: new Set()
 };
 
 const talkAudioState = {
@@ -895,8 +895,16 @@ function armAudioPlayback() {
   }).catch(() => {});
 }
 
+function stopAudioPlayback() {
+  audioState.nextPlayAt = 0;
+  for (const source of audioState.activeSources) {
+    try { source.stop(); } catch {}
+  }
+  audioState.activeSources.clear();
+}
+
 function playAudioChunk(message) {
-  if (!audioState.enabled || !audioState.ctx || !message.payload) return;
+  if (!audioState.enabled || !audioState.ctx || !message.payload || talkOn) return;
   const bytes = decodeBase64ToBytes(message.payload);
   const sampleRate = Number(message.sampleRate || 16000);
   const samples = decodeAdpcmChunk(bytes, Number(message.samples || 0));
@@ -908,11 +916,13 @@ function playAudioChunk(message) {
   if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04)
     audioState.nextPlayAt = now + audioState.targetLeadSeconds;
   if (audioState.nextPlayAt - now > audioState.maxLeadSeconds) {
-    audioState.nextPlayAt = now + audioState.targetLeadSeconds; return;
+    audioState.nextPlayAt = now + audioState.targetLeadSeconds;
   }
   const source = ctx.createBufferSource();
   source.buffer = buffer; source.connect(ctx.destination);
   if (audioState.mixDestination) source.connect(audioState.mixDestination);
+  audioState.activeSources.add(source);
+  source.onended = () => audioState.activeSources.delete(source);
   source.start(audioState.nextPlayAt);
   audioState.nextPlayAt += buffer.duration;
 }
@@ -941,6 +951,7 @@ function startApAudioWs() {
 // ============================================================
 async function talkStart() {
   if (talkOn) return;
+  stopAudioPlayback();
   armAudioPlayback();
   const ok = await ensureTalkCapture();
   if (!ok) return;
