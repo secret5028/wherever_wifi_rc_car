@@ -770,6 +770,10 @@ void startHttpServer() {
   cameraServer.on("/api/talk-audio", HTTP_POST, handleTalkAudio);
   cameraServer.on("/jpg", HTTP_GET, handleJpeg);
   cameraServer.on("/stream", HTTP_GET, handleStream);
+  cameraServer.onNotFound([]() {
+    Serial.printf("[HTTP] 404 %s\n", cameraServer.uri().c_str());
+    cameraServer.send(404, "text/plain", "not found");
+  });
   cameraServer.begin();
   serverStarted = true;
   cameraServerStarted = true;
@@ -803,6 +807,7 @@ void startHttpServer() {
 void handleRoot() {
   // web/index.html 내용을 직접 전송 (PROGMEM 대신 LittleFS 미사용 환경 대응)
   // AP/STA 모드 공통 UI: web/index.html의 isApOrLocal 분기로 자동 처리됨
+  Serial.printf("[HTTP] GET / from %s\n", cameraServer.client().remoteIP().toString().c_str());
   cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   cameraServer.send_P(200, "text/html; charset=utf-8", WEB_INDEX_HTML);
 }
@@ -951,6 +956,10 @@ void handleTalkAudio() {
     cameraServer.send(503, "application/json", "{\"ok\":false,\"reason\":\"speaker_not_ready\"}");
     return;
   }
+  if (!talkEnabled) {
+    cameraServer.send(409, "application/json", "{\"ok\":false,\"reason\":\"talk_disabled\"}");
+    return;
+  }
 
   StaticJsonDocument<512> doc;
   DeserializationError err = deserializeJson(doc, cameraServer.arg("plain"));
@@ -988,13 +997,6 @@ void handleWifiScan() {
 
   // Wi-Fi 스캔 (blocking, 최대 3초)
   int n = WiFi.scanNetworks(false, false, false, 300);
-
-  // 저장된 SSID 목록
-  StaticJsonDocument<512> savedDoc;
-  JsonObject savedObj = savedDoc.to<JsonObject>();
-  for (uint8_t i = 0; i < rememberedWifiCount; i++) {
-    savedObj[rememberedSsids[i]] = rememberedPasswords[i];
-  }
 
   // 응답 JSON 구성 (DynamicJsonDocument로 넉넉하게)
   DynamicJsonDocument doc(2048);
