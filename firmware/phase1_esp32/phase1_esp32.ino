@@ -1,9 +1,9 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <ESP_I2S.h>
-#include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <WebSocketsServer.h>
 #include <ArduinoJson.h>
 #include <libb64/cencode.h>
 #include <Preferences.h>
@@ -12,6 +12,7 @@
 #include "esp_camera.h"
 
 #include "secrets.h"
+#include "web_index.h"
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN -1
@@ -20,7 +21,7 @@
 namespace {
 WebSocketsClient ws;
 WebServer cameraServer(80);
-DNSServer dnsServer;
+WebSocketsServer localAudioWs(81);
 I2SClass microphone;
 I2SClass speaker;
 Preferences preferences;
@@ -47,7 +48,6 @@ constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
 constexpr size_t AUDIO_ADPCM_HEADER_BYTES = 4;
 constexpr size_t AUDIO_ADPCM_PAYLOAD_BYTES = AUDIO_ADPCM_HEADER_BYTES + ((AUDIO_STREAM_SAMPLES - 1 + 1) / 2);
 constexpr size_t AUDIO_BASE64_BUFFER_LEN = 433;
-constexpr uint8_t DNS_PORT = 53;
 
 unsigned long lastWifiAttemptAt = 0;
 unsigned long wifiConnectStartedAt = 0;
@@ -75,6 +75,7 @@ bool talkEnabled = false;
 bool apMode = false;
 bool serverStarted = false;
 bool hasStoredWifi = false;
+bool localAudioWsStarted = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
@@ -192,7 +193,10 @@ void handleControlJson();
 void handleConfigSave();
 void handleJpeg();
 void handleStream();
-void redirectToCaptivePortal();
+void handleWifiScan();
+void handleWifiConnect();
+void handleTalkAudio();
+void handleCaptivePortal();
 void playSpeakerBootTone();
 size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
 size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
@@ -424,8 +428,6 @@ void startProvisioningAp() {
   delay(100);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWORD);
-  delay(100);
-  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
   apMode = true;
   wifiConnectInFlight = false;
   wsConnectInFlight = false;
@@ -530,12 +532,6 @@ void writeMotorOutput(int throttle) {
   }
 
   ledcWriteChannel(MOTOR_PWM_CHANNEL, duty);
-}
-
-void redirectToCaptivePortal() {
-  String location = String("http://") + WiFi.softAPIP().toString() + "/";
-  cameraServer.sendHeader("Location", location, true);
-  cameraServer.send(302, "text/plain", "");
 }
 
 void writeSteeringOutput(int steering) {
@@ -769,112 +765,48 @@ void startHttpServer() {
   cameraServer.on("/api/status", HTTP_GET, handleStatusJson);
   cameraServer.on("/api/control", HTTP_POST, handleControlJson);
   cameraServer.on("/api/config", HTTP_POST, handleConfigSave);
+  cameraServer.on("/api/wifi-scan", HTTP_GET, handleWifiScan);
+  cameraServer.on("/api/wifi-connect", HTTP_POST, handleWifiConnect);
+  cameraServer.on("/api/talk-audio", HTTP_POST, handleTalkAudio);
   cameraServer.on("/jpg", HTTP_GET, handleJpeg);
   cameraServer.on("/stream", HTTP_GET, handleStream);
-  cameraServer.on("/generate_204", HTTP_GET, redirectToCaptivePortal);
-  cameraServer.on("/hotspot-detect.html", HTTP_GET, redirectToCaptivePortal);
-  cameraServer.on("/connecttest.txt", HTTP_GET, redirectToCaptivePortal);
-  cameraServer.on("/redirect", HTTP_GET, redirectToCaptivePortal);
-  cameraServer.on("/canonical.html", HTTP_GET, redirectToCaptivePortal);
-  cameraServer.on("/ncsi.txt", HTTP_GET, []() {
-    cameraServer.send(200, "text/plain", "Microsoft NCSI");
-  });
-  cameraServer.onNotFound([]() {
-    if (apMode) {
-      redirectToCaptivePortal();
-      return;
-    }
-    cameraServer.send(404, "text/plain", "Not found");
-  });
   cameraServer.begin();
   serverStarted = true;
   cameraServerStarted = true;
+  if (!localAudioWsStarted) {
+    localAudioWs.begin();
+    localAudioWs.onEvent([](uint8_t clientNum, WStype_t type, uint8_t* payload, size_t length) {
+      switch (type) {
+        case WStype_CONNECTED: {
+          IPAddress ip = localAudioWs.remoteIP(clientNum);
+          Serial.printf("[WS-LOCAL] client %u connected from %u.%u.%u.%u\n", clientNum, ip[0], ip[1], ip[2], ip[3]);
+          break;
+        }
+        case WStype_DISCONNECTED:
+          Serial.printf("[WS-LOCAL] client %u disconnected\n", clientNum);
+          break;
+        case WStype_TEXT:
+          if (length == 4 && memcmp(payload, "ping", 4) == 0) {
+            localAudioWs.sendTXT(clientNum, "pong");
+          }
+          break;
+        default:
+          break;
+      }
+    });
+    localAudioWsStarted = true;
+    Serial.println("[WS-LOCAL] listening on :81");
+  }
   Serial.println("[HTTP] server started on :80");
 }
 
 void handleRoot() {
-  String html;
-  html += "<!doctype html><html><head><meta charset='utf-8'>";
-  html += "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>";
-  html += "<title>RC Car</title>";
-  html += "<style>body{font-family:sans-serif;margin:0;background:#111;color:#f4f4f4}main{max-width:720px;margin:0 auto;padding:16px}form,input,button{font:inherit}button{padding:12px 16px;border:0;border-radius:10px;background:#2a2a2a;color:#fff}input{padding:12px;border-radius:10px;border:1px solid #444;background:#1d1d1d;color:#fff;width:100%;box-sizing:border-box}.stack{display:grid;gap:12px}.panel{background:#1b1b1b;padding:16px;border-radius:16px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.stream{width:100%;border-radius:16px;transform:scaleX(-1);background:#000}.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px}.wide{grid-column:1/-1}.pill{font-size:14px;color:#9ad}.muted{color:#aaa;font-size:13px}.hidden{display:none!important}.topbar{display:flex;gap:12px;align-items:center;justify-content:space-between}.setup{background:#375a7f}.accent{background:#185a36}</style></head><body><main>";
-  html += "<div class='panel stack'><div class='topbar'><h1>RC Car Control</h1><button type='button' class='setup' onclick='toggleSetup()'>";
-  html += apMode ? "Wi-Fi Setup" : "Network";
-  html += "</button></div>";
-  html += "<div id='status' class='pill'>connecting...</div>";
-  if (apMode) {
-    html += "<div class='muted'>AP direct mode. Connect controls locally now, then save Wi-Fi to return to broker mode.</div>";
-  }
-  html += "<img class='stream' src='/stream'>";
-  html += "<div class='controls'>";
-  html += "<button type='button' onclick='sendCtrl(100,0)' class='wide accent'>Forward</button>";
-  html += "<button type='button' onclick='sendCtrl(0,-35)'>Left</button>";
-  html += "<button type='button' onclick='sendCtrl(0,0)'>Stop</button>";
-  html += "<button type='button' onclick='sendCtrl(0,35)'>Right</button>";
-  html += "<button type='button' onclick='sendCtrl(-70,0)' class='wide'>Reverse</button>";
-  html += "</div>";
-  html += "<div class='stack'><label>Throttle <input id='throttle' type='range' min='-100' max='100' value='0'></label>";
-  html += "<label>Steering <input id='steering' type='range' min='-100' max='100' value='0'></label>";
-  html += "<div class='row'><button type='button' onclick='applySliders()'>Apply</button><button type='button' onclick='toggleLed()'>LED</button></div></div>";
-  html += "<div id='setup-panel' class='panel stack hidden'><h2>Wi-Fi Setup</h2>";
-  html += "<div class='pill'>AP SSID: ";
-  html += AP_SSID;
-  html += " / password: ";
-  html += AP_PASSWORD;
-  html += "</div>";
-  if (rememberedWifiCount > 0) {
-    html += "<label>Remembered Wi-Fi<select id='saved-ssid' onchange='applySavedWifi(this.value)'><option value=''>Select saved network</option>";
-    for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
-      html += "<option value='";
-      html += rememberedSsids[i];
-      html += "'>";
-      html += rememberedSsids[i];
-      html += "</option>";
-    }
-    html += "</select></label>";
-  }
-  html += "<form class='stack' method='post' action='/api/config'>";
-  html += "<input id='ssid-input' name='ssid' placeholder='Wi-Fi SSID' required value='";
-  html += activeWifiSsid;
-  html += "'>";
-  html += "<input id='password-input' name='password' placeholder='Wi-Fi Password (leave blank to keep current)' type='password'>";
-  html += "<input id='broker-host-input' name='brokerHost' placeholder='Broker Host/IP' value='";
-  html += activeBrokerHost;
-  html += "'>";
-  html += "<input id='broker-port-input' name='brokerPort' placeholder='Broker Port' type='number' min='1' max='65535' value='";
-  html += String(activeBrokerPort);
-  html += "'>";
-  html += "<input id='device-id-input' name='deviceId' placeholder='Device ID' value='";
-  html += activeDeviceId;
-  html += "'>";
-  html += "<button class='accent' type='submit'>Connect And Reboot</button>";
-  html += "</form></div>";
-  html += "</div><script>";
-  html += "const setupPanel=document.getElementById('setup-panel');const statusEl=document.getElementById('status');const throttleEl=document.getElementById('throttle');const steeringEl=document.getElementById('steering');const ssidInput=document.getElementById('ssid-input');const passwordInput=document.getElementById('password-input');let led=false;";
-  html += "const savedWifiPasswords={";
-  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
-    if (i > 0) {
-      html += ",";
-    }
-    html += "'";
-    html += rememberedSsids[i];
-    html += "':'";
-    html += rememberedPasswords[i];
-    html += "'";
-  }
-  html += "};";
-  html += "async function postJson(path,payload){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})}";
-  html += "async function sendCtrl(t,s){await postJson('/api/control',{throttle:t,steering:s})}";
-  html += "function applySliders(){sendCtrl(+throttleEl.value,+steeringEl.value)}";
-  html += "async function toggleLed(){led=!led; await postJson('/api/control',{ledEnabled:led})}";
-  html += "function toggleSetup(){setupPanel.classList.toggle('hidden')}";
-  html += "function applySavedWifi(ssid){if(!ssid){return;}ssidInput.value=ssid;if(savedWifiPasswords[ssid]!==undefined){passwordInput.value=savedWifiPasswords[ssid];}}";
-  html += "setInterval(async()=>{try{const r=await fetch('/api/status'); const j=await r.json(); led=!!j.ledEnabled; statusEl.textContent=(j.apMode?'AP ':'STA ')+j.ip+' | RSSI '+j.rssi+' dBm | BAT '+j.batteryPct+'% | mode '+j.mode+' | broker '+(j.wsConnected?'on':'off');}catch(_){statusEl.textContent='status unavailable';}},1500);";
-  html += "</script>";
-
-  html += "</main></body></html>";
-  cameraServer.send(200, "text/html", html);
+  // web/index.html 내용을 직접 전송 (PROGMEM 대신 LittleFS 미사용 환경 대응)
+  // AP/STA 모드 공통 UI: web/index.html의 isApOrLocal 분기로 자동 처리됨
+  cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  cameraServer.send_P(200, "text/html; charset=utf-8", WEB_INDEX_HTML);
 }
+
 
 void handleStatusJson() {
   StaticJsonDocument<192> doc;
@@ -894,7 +826,8 @@ void handleStatusJson() {
 }
 
 void handleControlJson() {
-  StaticJsonDocument<192> doc;
+  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+  StaticJsonDocument<512> doc;
   DeserializationError error = deserializeJson(doc, cameraServer.arg("plain"));
   if (error) {
     cameraServer.send(400, "application/json", "{\"ok\":false}");
@@ -906,6 +839,13 @@ void handleControlJson() {
   }
   if (doc.containsKey("throttle") || doc.containsKey("steering")) {
     applyControl(doc["throttle"] | lastThrottle, doc["steering"] | lastSteering);
+  }
+  if (doc.containsKey("talk")) {
+    talkEnabled = doc["talk"] | false;
+    Serial.printf("[TALK] %s (AP mode)\n", talkEnabled ? "on" : "off");
+  }
+  if (doc.containsKey("quality")) {
+    applyCameraQuality(doc["quality"] | "QVGA");
   }
   cameraServer.send(200, "application/json", "{\"ok\":true}");
 }
@@ -1005,6 +945,120 @@ void handleStream() {
     delay(30);
   }
 }
+void handleTalkAudio() {
+  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!speakerReady) {
+    cameraServer.send(503, "application/json", "{\"ok\":false,\"reason\":\"speaker_not_ready\"}");
+    return;
+  }
+
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, cameraServer.arg("plain"));
+  if (err) {
+    cameraServer.send(400, "application/json", "{\"ok\":false}");
+    return;
+  }
+
+  const char* payloadBase64 = doc["payload"] | "";
+  size_t decodedLen = decodeBase64Payload(payloadBase64, audioDecodeBuffer, sizeof(audioDecodeBuffer));
+  if (decodedLen == 0) {
+    cameraServer.send(400, "application/json", "{\"ok\":false,\"reason\":\"decode_failed\"}");
+    return;
+  }
+  size_t sampleCount = static_cast<size_t>(doc["samples"] | static_cast<int>(AUDIO_STREAM_SAMPLES));
+  sampleCount = min(sampleCount, static_cast<size_t>(AUDIO_STREAM_SAMPLES));
+  size_t pcmSamples = decodeAdpcmBlock(audioDecodeBuffer, decodedLen, audioPlaybackBuffer, sampleCount);
+  if (pcmSamples > 0) {
+    playSpeakerSamples(audioPlaybackBuffer, pcmSamples);
+  }
+  cameraServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+
+void handleCaptivePortal() {
+  String apIp = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  String location = String("http://") + apIp + "/";
+  cameraServer.sendHeader("Location", location);
+  cameraServer.send(302, "text/plain", "");
+}
+
+void handleWifiScan() {
+  // CORS 허용
+  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+  // Wi-Fi 스캔 (blocking, 최대 3초)
+  int n = WiFi.scanNetworks(false, false, false, 300);
+
+  // 저장된 SSID 목록
+  StaticJsonDocument<512> savedDoc;
+  JsonObject savedObj = savedDoc.to<JsonObject>();
+  for (uint8_t i = 0; i < rememberedWifiCount; i++) {
+    savedObj[rememberedSsids[i]] = rememberedPasswords[i];
+  }
+
+  // 응답 JSON 구성 (DynamicJsonDocument로 넉넉하게)
+  DynamicJsonDocument doc(2048);
+  JsonArray networks = doc.createNestedArray("networks");
+
+  if (n > 0) {
+    for (int i = 0; i < n && i < 20; i++) {
+      JsonObject net = networks.createNestedObject();
+      net["ssid"]   = WiFi.SSID(i);
+      net["rssi"]   = WiFi.RSSI(i);
+      net["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    }
+  }
+  WiFi.scanDelete();
+
+  // saved passwords map
+  JsonObject saved = doc.createNestedObject("saved");
+  for (uint8_t i = 0; i < rememberedWifiCount; i++) {
+    saved[rememberedSsids[i]] = rememberedPasswords[i];
+  }
+
+  String payload;
+  serializeJson(doc, payload);
+  cameraServer.send(200, "application/json", payload);
+  Serial.printf("[SCAN] found %d networks\n", n);
+}
+
+void handleWifiConnect() {
+  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, cameraServer.arg("plain"));
+  if (err) {
+    cameraServer.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_json\"}");
+    return;
+  }
+
+  String ssid     = String(doc["ssid"] | "");
+  String password = String(doc["password"] | "");
+  ssid.trim();
+  password.trim();
+
+  if (ssid.length() == 0) {
+    cameraServer.send(400, "application/json", "{\"ok\":false,\"reason\":\"ssid_required\"}");
+    return;
+  }
+
+  // 비번이 비어있으면 저장된 것 사용
+  if (password.length() == 0) {
+    String saved = getRememberedPassword(ssid);
+    if (saved.length() > 0) {
+      password = saved;
+    }
+  }
+
+  // broker 정보는 기존 것 유지
+  saveConfig(ssid, password, activeBrokerHost, activeBrokerPort, activeDeviceId);
+  setConnectOnBoot(true);
+
+  cameraServer.send(200, "application/json", "{\"ok\":true}");
+  Serial.printf("[CFG] wifi-connect ssid=%s -> reboot\n", ssid.c_str());
+  restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
+}
+
 
 void uploadVideoFrameIfNeeded() {
   if (!cameraReady || !wsConnected) {
@@ -1169,7 +1223,9 @@ void playSpeakerSamples(const int16_t* samples, size_t sampleCount) {
 }
 
 void uploadAudioChunkIfNeeded() {
-  if (!microphoneReady || !wsConnected || talkEnabled) {
+  const bool hasLocalAudioClients = localAudioWsStarted && localAudioWs.connectedClients() > 0;
+  const bool shouldSendBrokerAudio = wsConnected;
+  if (!microphoneReady || talkEnabled || (!shouldSendBrokerAudio && !hasLocalAudioClients)) {
     return;
   }
 
@@ -1210,8 +1266,18 @@ void uploadAudioChunkIfNeeded() {
 
   String payload;
   serializeJson(doc, payload);
-  if (!ws.sendTXT(payload)) {
-    Serial.println("[MIC] upload failed");
+  bool sent = false;
+  if (shouldSendBrokerAudio) {
+    sent = ws.sendTXT(payload);
+    if (!sent) {
+      Serial.println("[MIC] broker upload failed");
+    }
+  }
+  if (hasLocalAudioClients) {
+    localAudioWs.broadcastTXT(payload);
+    sent = true;
+  }
+  if (!sent) {
     return;
   }
 
@@ -1370,11 +1436,11 @@ void loop() {
   if ((apMode || WiFi.isConnected()) && !serverStarted) {
     startHttpServer();
   }
-  if (apMode) {
-    dnsServer.processNextRequest();
-  }
   ensureWebSocketConnected();
   ws.loop();
+  if (localAudioWsStarted) {
+    localAudioWs.loop();
+  }
   if (serverStarted) {
     cameraServer.handleClient();
   }

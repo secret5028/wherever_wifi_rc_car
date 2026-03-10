@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -19,295 +19,238 @@
     --btn-active: rgba(74, 222, 128, 0.3);
   }
 
-  * {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-    touch-action: manipulation;
-  }
-
-  html,
-  body {
-    min-height: 100%;
-  }
-
-  body {
-    background: #3a7bd5;
-    min-height: 100vh;
-    font-family: "Share Tech Mono", monospace;
-    overflow: hidden;
-  }
+  * { box-sizing: border-box; margin: 0; padding: 0; touch-action: manipulation; }
+  html, body { min-height: 100%; }
+  body { background: #3a7bd5; min-height: 100vh; font-family: "Share Tech Mono", monospace; overflow: hidden; }
 
   #app {
-    position: fixed;
-    inset: 0;
-    width: 100vw;
-    height: 100vh;
-    min-height: 100vh;
-    background: var(--bg);
-    border-radius: 0;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
+    position: fixed; inset: 0; width: 100vw; height: 100vh;
+    background: var(--bg); border-radius: 0; overflow: hidden;
+    display: flex; flex-direction: column;
   }
 
   #stream-wrap {
-    position: relative;
-    width: 100%;
-    flex: 0 0 38dvh;
-    min-height: 220px;
-    background: #0a0a1a;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    position: relative; width: 100%; flex: 0 0 38dvh;
+    min-height: 220px; background: #0a0a1a; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
   }
-
   #stream-wrap::before {
-    content: "NO SIGNAL";
-    position: absolute;
-    color: rgba(255, 255, 255, 0.15);
-    font-family: "Orbitron", sans-serif;
-    font-size: 13px;
-    letter-spacing: 4px;
-    animation: blink 2s infinite;
+    content: "NO SIGNAL"; position: absolute;
+    color: rgba(255,255,255,0.15); font-family: "Orbitron", sans-serif;
+    font-size: 13px; letter-spacing: 4px; animation: blink 2s infinite;
   }
-
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
   #stream {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-    position: relative;
-    z-index: 1;
-    background: #111;
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    position: relative; z-index: 1; background: #111;
+    transform: scaleX(-1);
   }
-
-  #stream[src=""] {
-    opacity: 0;
-  }
+  #stream[src=""] { opacity: 0; }
 
   #hud {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    padding: 8px 10px;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    pointer-events: none;
-    z-index: 2;
+    position: absolute; top: 0; left: 0; right: 0;
+    padding: 8px 10px; display: flex; justify-content: space-between;
+    align-items: flex-start; pointer-events: none; z-index: 2;
   }
-
-  #hud-left,
+  #hud-left, #hud-right {
+    background: var(--hud); backdrop-filter: blur(4px);
+    border-radius: 6px; padding: 5px 8px; font-size: 11px;
+    color: #fff; line-height: 1.6; border: 1px solid rgba(255,255,255,0.15);
+  }
+  #hud-left span { display: block; }
   #hud-right {
-    background: var(--hud);
-    backdrop-filter: blur(4px);
-    border-radius: 6px;
-    padding: 5px 8px;
-    font-size: 11px;
-    color: #fff;
-    line-height: 1.6;
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    pointer-events: all; cursor: pointer;
+    transition: background 0.2s; text-align: right;
   }
-
-  #hud-left span {
-    display: block;
-  }
-
-  #hud-right {
-    pointer-events: all;
-    cursor: pointer;
-    transition: background 0.2s;
-    text-align: right;
-  }
-
-  #hud-right:active {
-    background: rgba(255, 255, 255, 0.25);
-  }
-
+  #hud-right:active { background: rgba(255,255,255,0.25); }
   .bat-val { color: var(--green); }
   .rssi-val { color: var(--blue); }
   .mode-val { color: #fef08a; }
 
-  #toolbar {
-    display: flex;
-    background: var(--panel);
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  /* AP모드 배너 */
+  #ap-banner {
+    display: none; background: #92400e; color: #fef3c7;
+    font-size: 11px; text-align: center; padding: 5px 10px;
+    font-family: "Orbitron", sans-serif; letter-spacing: 1px;
+    border-bottom: 1px solid #b45309;
   }
+  #ap-banner.visible { display: block; }
 
+  #toolbar {
+    display: flex; background: var(--panel);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
   .tb-btn {
-    flex: 1;
-    padding: 11px 4px;
-    font-family: "Orbitron", sans-serif;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    color: var(--text);
-    background: transparent;
-    border: none;
-    border-right: 1px solid rgba(255, 255, 255, 0.06);
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    flex: 1; padding: 11px 4px;
+    font-family: "Orbitron", sans-serif; font-size: 10px;
+    font-weight: 700; letter-spacing: 0.5px; color: var(--text);
+    background: transparent; border: none;
+    border-right: 1px solid rgba(255,255,255,0.06);
+    cursor: pointer; transition: background 0.15s, color 0.15s;
     user-select: none;
   }
-
-  .tb-btn:last-child {
-    border-right: none;
-  }
-
-  .tb-btn:active,
-  .tb-btn.active {
-    background: var(--btn-active);
-    color: var(--green);
-  }
-
-  .tb-btn.rec-btn {
-    background: var(--red);
-    color: #fff;
-  }
-
-  .tb-btn.rec-btn.active {
-    background: #b91c1c;
-    animation: pulse 1s infinite;
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
-  }
+  .tb-btn:last-child { border-right: none; }
+  .tb-btn:active, .tb-btn.active { background: var(--btn-active); color: var(--green); }
+  .tb-btn.rec-btn { background: var(--red); color: #fff; }
+  .tb-btn.rec-btn.active { background: #b91c1c; animation: pulse 1s infinite; }
+  .tb-btn.net-btn { color: var(--orange); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 
   #control-panel {
-    background: #1e1e2e;
-    padding: 10px 10px calc(14px + env(safe-area-inset-bottom));
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
+    background: #1e1e2e; padding: 10px 10px calc(14px + env(safe-area-inset-bottom));
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
   }
-
   #mode-label {
-    text-align: center;
-    font-size: 10px;
-    color: rgba(255, 255, 255, 0.35);
-    letter-spacing: 2px;
-    margin-bottom: 8px;
-    font-family: "Orbitron", sans-serif;
+    text-align: center; font-size: 10px;
+    color: rgba(255,255,255,0.35); letter-spacing: 2px;
+    margin-bottom: 8px; font-family: "Orbitron", sans-serif;
   }
-
   #joystick-outer {
-    width: 100%;
-    flex: 1 1 auto;
-    min-height: 220px;
-    background: #111122;
-    border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    position: relative;
-    overflow: hidden;
+    width: 100%; flex: 1 1 auto; min-height: 220px;
+    background: #111122; border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.07);
+    display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
   }
-
   #joystick-outer::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    content: ""; position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
     background-size: 30px 30px;
   }
-
   #joystick-outer::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
-    background-size: 100% 50%, 50% 100%;
-    background-position: center;
+    content: ""; position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+    background-size: 100% 50%, 50% 100%; background-position: center;
   }
-
   #joystick-ring {
-    width: 180px;
-    height: 180px;
-    border-radius: 50%;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    position: absolute;
-    z-index: 1;
-    box-shadow:
-      0 0 0 30px rgba(255, 255, 255, 0.02),
-      0 0 0 60px rgba(255, 255, 255, 0.015);
+    width: 180px; height: 180px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.18); position: absolute; z-index: 1;
+    box-shadow: 0 0 0 30px rgba(255,255,255,0.02), 0 0 0 60px rgba(255,255,255,0.015);
   }
-
   #joystick-knob {
-    width: 90px;
-    height: 90px;
-    border-radius: 50%;
+    width: 90px; height: 90px; border-radius: 50%;
     background: radial-gradient(circle at 35% 35%, #f0e060, #c8a800);
-    border: 8px solid rgba(180, 150, 0, 0.4);
-    position: absolute;
-    cursor: grab;
-    touch-action: none;
-    transition: border-color 0.1s;
-    box-shadow:
-      0 4px 20px rgba(0, 0, 0, 0.5),
-      inset 0 2px 6px rgba(255, 255, 255, 0.2);
+    border: 8px solid rgba(180,150,0,0.4); position: absolute;
+    cursor: grab; touch-action: none; transition: border-color 0.1s;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5), inset 0 2px 6px rgba(255,255,255,0.2);
     z-index: 10;
   }
+  #joystick-knob:active { cursor: grabbing; border-color: rgba(255,220,0,0.6); }
+  .btn-on { box-shadow: inset 0 0 0 2px var(--green); color: var(--green); }
 
-  #joystick-knob:active {
-    cursor: grabbing;
-    border-color: rgba(255, 220, 0, 0.6);
+  /* ===== WiFi 패널 오버레이 ===== */
+  #wifi-overlay {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.85); backdrop-filter: blur(6px);
+    align-items: flex-end; justify-content: center;
+  }
+  #wifi-overlay.open { display: flex; }
+
+  #wifi-panel {
+    background: #16213e; width: 100%; max-width: 480px;
+    border-radius: 20px 20px 0 0; padding: 20px 16px calc(24px + env(safe-area-inset-bottom));
+    border-top: 1px solid rgba(255,255,255,0.1);
+    max-height: 80vh; overflow-y: auto;
+  }
+  #wifi-panel h2 {
+    font-family: "Orbitron", sans-serif; font-size: 13px;
+    color: var(--orange); letter-spacing: 2px; margin-bottom: 14px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #wifi-panel h2 button {
+    background: none; border: none; color: rgba(255,255,255,0.5);
+    font-size: 18px; cursor: pointer; padding: 0 4px;
   }
 
-  .btn-on {
-    box-shadow: inset 0 0 0 2px var(--green);
-    color: var(--green);
+  #wifi-scan-list {
+    display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px;
+    min-height: 48px;
   }
+  .wifi-item {
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(255,255,255,0.05); border-radius: 10px;
+    padding: 10px 12px; cursor: pointer; border: 1px solid transparent;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .wifi-item:active, .wifi-item.selected { border-color: var(--orange); background: rgba(249,115,22,0.1); }
+  .wifi-item-ssid { font-size: 13px; color: var(--text); }
+  .wifi-item-meta { font-size: 11px; color: rgba(255,255,255,0.4); display: flex; gap: 8px; align-items: center; }
+  .wifi-lock { color: var(--orange); font-size: 10px; }
+  .wifi-saved { color: var(--green); font-size: 10px; }
+
+  #wifi-pw-row {
+    display: none; margin-bottom: 10px;
+  }
+  #wifi-pw-row.visible { display: block; }
+  #wifi-pw-input {
+    width: 100%; padding: 11px 12px; background: #0f172a;
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 10px;
+    color: var(--text); font-family: "Share Tech Mono", monospace;
+    font-size: 14px; outline: none;
+  }
+  #wifi-pw-input:focus { border-color: var(--orange); }
+
+  #wifi-connect-btn {
+    width: 100%; padding: 13px; background: var(--orange);
+    border: none; border-radius: 12px; color: #fff;
+    font-family: "Orbitron", sans-serif; font-size: 12px;
+    font-weight: 700; letter-spacing: 1px; cursor: pointer;
+    transition: background 0.15s; margin-bottom: 8px;
+  }
+  #wifi-connect-btn:active { background: #c2410c; }
+  #wifi-connect-btn:disabled { background: rgba(255,255,255,0.15); cursor: not-allowed; }
+
+  #wifi-scan-btn {
+    width: 100%; padding: 10px; background: transparent;
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 10px;
+    color: rgba(255,255,255,0.5); font-family: "Share Tech Mono", monospace;
+    font-size: 12px; cursor: pointer; transition: border-color 0.15s;
+  }
+  #wifi-scan-btn:active { border-color: var(--blue); color: var(--blue); }
+
+  #wifi-status-msg {
+    text-align: center; font-size: 11px; color: rgba(255,255,255,0.4);
+    margin-top: 10px; min-height: 16px;
+  }
+  #wifi-status-msg.ok { color: var(--green); }
+  #wifi-status-msg.err { color: var(--red); }
+
+  /* ===== 브로커 모드 전환 안내 ===== */
+  #broker-hint {
+    display: none; background: #14532d; border: 1px solid #166534;
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+    font-size: 11px; color: #bbf7d0; line-height: 1.6;
+  }
+
+  .scan-spinner { display: inline-block; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   @media (min-width: 768px) {
-    body {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 20px;
-      overflow: auto;
-    }
-
+    body { display: flex; justify-content: center; align-items: center; padding: 20px; overflow: auto; }
     #app {
-      position: relative;
-      inset: auto;
+      position: relative; inset: auto;
       width: min(420px, 100vw);
       min-height: min(900px, calc(100dvh - 40px));
       height: min(900px, calc(100dvh - 40px));
       border-radius: 16px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.08);
     }
-
-    #stream-wrap {
-      flex-basis: 260px;
-      min-height: 260px;
-    }
-
-    #joystick-outer {
-      min-height: 220px;
-    }
+    #stream-wrap { flex-basis: 260px; min-height: 260px; }
+    #joystick-outer { min-height: 220px; }
+    #wifi-panel { border-radius: 16px; margin: auto; }
+    #wifi-overlay { align-items: center; }
   }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="ap-banner" class="visible">⚡ AP 로컬 모드 — 192.168.4.1 직접 연결 중</div>
+
   <div id="stream-wrap">
     <img id="stream" src="" alt="stream" crossorigin="anonymous">
     <div id="hud">
@@ -323,11 +266,11 @@
   </div>
 
   <div id="toolbar">
-    <button class="tb-btn" id="btn-led" type="button">Led1</button>
-    <button class="tb-btn" id="btn-mode" type="button">MODE</button>
+    <button class="tb-btn" id="btn-led" type="button">LED</button>
+    <button class="tb-btn net-btn" id="btn-net" type="button">NET</button>
     <button class="tb-btn" id="btn-snap" type="button">SNAP</button>
     <button class="tb-btn" id="btn-talk" type="button">TALK</button>
-    <button class="tb-btn rec-btn" id="btn-rec" type="button">rec</button>
+    <button class="tb-btn rec-btn" id="btn-rec" type="button">REC</button>
   </div>
 
   <div id="control-panel">
@@ -339,16 +282,55 @@
   </div>
 </div>
 
+<!-- WiFi 전환 패널 오버레이 -->
+<div id="wifi-overlay">
+  <div id="wifi-panel">
+    <h2>
+      <span>🌐 네트워크 전환</span>
+      <button onclick="closeWifiPanel()">✕</button>
+    </h2>
+    <div id="broker-hint">
+      ✅ Wi-Fi 선택 후 <b>연결</b>을 누르면 브로커 모드로 전환됩니다.<br>
+      연결 성공 시 자동으로 리부팅됩니다.
+    </div>
+    <div id="wifi-scan-list">
+      <div style="color:rgba(255,255,255,0.3);font-size:12px;text-align:center;padding:12px">
+        스캔 버튼을 눌러 주변 Wi-Fi를 검색하세요
+      </div>
+    </div>
+    <div id="wifi-pw-row">
+      <input id="wifi-pw-input" type="password" placeholder="Wi-Fi 비밀번호 입력" autocomplete="off">
+    </div>
+    <button id="wifi-connect-btn" disabled onclick="doWifiConnect()">연결</button>
+    <button id="wifi-scan-btn" onclick="doWifiScan()">📡 주변 Wi-Fi 스캔</button>
+    <div id="wifi-status-msg"></div>
+  </div>
+</div>
+
 <canvas id="snapshot-canvas" hidden></canvas>
 
 <script>
-const brokerUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/client`;
+// ============================================================
+// 모드 감지: AP모드면 ESP32 직접, 아니면 broker WebSocket
+// ============================================================
+
+// 페이지가 192.168.4.1 또는 로컬 ESP32 IP에서 열린 경우 → AP/로컬 모드
+// broker(Oracle VM) IP에서 열린 경우 → broker 모드
+const isApOrLocal = (() => {
+  const h = location.hostname;
+  // 192.168.x.x / 10.x.x.x / 172.16-31.x.x → 로컬 ESP32
+  return /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./.test(h);
+})();
+
+const ESP32_BASE = isApOrLocal ? `http://${location.host}` : null;
+const brokerUrl = isApOrLocal ? null
+  : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/client`;
 const defaultDeviceId = "rc-car-01";
 const queryDeviceId = new URLSearchParams(location.search).get("deviceId");
 let deviceId = (queryDeviceId && queryDeviceId.trim()) || defaultDeviceId;
 const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 
-let ws;
+let ws = null;
 let wsReady = false;
 let driveMode = true;
 let resIdx = 0;
@@ -358,6 +340,11 @@ let recOn = false;
 let streamUrl = "";
 let snapshotInFlight = false;
 let wakeLockSentinel = null;
+let apModeActive = isApOrLocal;
+
+// AP모드 상태 표시
+const apBanner = document.getElementById("ap-banner");
+apBanner.classList.toggle("visible", apModeActive);
 
 const streamEl = document.getElementById("stream");
 const connLabel = document.getElementById("conn-label");
@@ -366,7 +353,7 @@ const rssiVal = document.getElementById("rssi-val");
 const resLabel = document.getElementById("res-label");
 const modeLabel = document.getElementById("mode-label");
 const btnLed = document.getElementById("btn-led");
-const btnMode = document.getElementById("btn-mode");
+const btnNet = document.getElementById("btn-net");
 const btnSnap = document.getElementById("btn-snap");
 const btnTalk = document.getElementById("btn-talk");
 const btnRec = document.getElementById("btn-rec");
@@ -374,34 +361,58 @@ const knob = document.getElementById("joystick-knob");
 const outerEl = document.getElementById("joystick-outer");
 const snapshotCanvas = document.getElementById("snapshot-canvas");
 
-const recorderState = {
-  stream: null,
-  recorder: null,
-  chunks: [],
-  renderTimer: null
-};
+// ============================================================
+// AP 모드: HTTP POST 기반 컨트롤
+// ============================================================
+async function apPost(path, payload) {
+  try {
+    const res = await fetch(`${ESP32_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function apGet(path) {
+  try {
+    const res = await fetch(`${ESP32_BASE}${path}`);
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// AP 모드 상태 폴링
+let apStatusTimer = null;
+function startApStatusPoll() {
+  if (apStatusTimer) return;
+  apStatusTimer = setInterval(async () => {
+    const s = await apGet("/api/status");
+    if (!s) { connLabel.textContent = "ESP32 응답없음"; return; }
+    connLabel.textContent = `AP ${s.ip}`;
+    if (typeof s.batteryPct === "number") batVal.textContent = `${s.batteryPct}%`;
+    if (typeof s.rssi === "number") rssiVal.textContent = `${signalPercentFromRssi(s.rssi)}%`;
+  }, 1500);
+}
+
+// ============================================================
+// broker 모드: WebSocket 기반
+// ============================================================
+const recorderState = { stream: null, recorder: null, chunks: [], renderTimer: null };
 
 const audioState = {
-  ctx: null,
-  mixDestination: null,
-  sampleRate: 16000,
-  enabled: false,
-  nextPlayAt: 0,
-  maxLeadSeconds: 0.24,
-  targetLeadSeconds: 0.05,
-  lastSeqByDevice: new Map()
+  ctx: null, mixDestination: null, sampleRate: 16000,
+  enabled: false, nextPlayAt: 0, maxLeadSeconds: 0.24,
+  targetLeadSeconds: 0.05, lastSeqByDevice: new Map()
 };
 
 const talkAudioState = {
-  ctx: null,
-  stream: null,
-  source: null,
-  processor: null,
-  muteGain: null,
-  pendingSamples: [],
-  seq: 0,
-  stepIndex: 0,
-  sentChunks: 0
+  ctx: null, stream: null, source: null, processor: null,
+  muteGain: null, pendingSamples: [], seq: 0, stepIndex: 0, sentChunks: 0
 };
 
 function setButtonState(button, active) {
@@ -409,72 +420,64 @@ function setButtonState(button, active) {
   button.classList.toggle("btn-on", active && button !== btnRec);
 }
 
-function send(payload) {
-  if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) {
-    return false;
+// 공통 컨트롤 함수 - AP/broker 자동 분기
+function sendCtrl(throttle, steering) {
+  if (apModeActive) {
+    apPost("/api/control", { throttle, steering });
+  } else {
+    send({ type: "ctrl", deviceId, throttle, steering });
   }
+}
+
+function sendLed(enabled) {
+  if (apModeActive) {
+    apPost("/api/control", { ledEnabled: enabled });
+  } else {
+    send({ type: "led", deviceId, enabled });
+  }
+}
+
+function sendMode(mode) {
+  if (!apModeActive) {
+    send({ type: "mode", deviceId, mode });
+  }
+}
+
+function send(payload) {
+  if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(payload));
   return true;
 }
 
-function wait(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
+function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function requestWakeLock() {
-  if (!("wakeLock" in navigator) || document.hidden || wakeLockSentinel) {
-    return;
-  }
+  if (!("wakeLock" in navigator) || document.hidden || wakeLockSentinel) return;
   try {
     wakeLockSentinel = await navigator.wakeLock.request("screen");
-    wakeLockSentinel.addEventListener("release", () => {
-      wakeLockSentinel = null;
-    }, { once: true });
-  } catch (_) {
-    wakeLockSentinel = null;
-  }
+    wakeLockSentinel.addEventListener("release", () => { wakeLockSentinel = null; }, { once: true });
+  } catch { wakeLockSentinel = null; }
 }
 
 async function releaseWakeLock() {
-  if (!wakeLockSentinel) {
-    return;
-  }
-  try {
-    await wakeLockSentinel.release();
-  } catch (_) {
-    // ignore release errors
-  }
+  if (!wakeLockSentinel) return;
+  try { await wakeLockSentinel.release(); } catch {}
   wakeLockSentinel = null;
 }
 
 function signalPercentFromRssi(rssi) {
-  if (typeof rssi !== "number") {
-    return null;
-  }
-  const percent = Math.round(((rssi + 100) / 50) * 100);
-  return Math.max(0, Math.min(100, percent));
+  if (typeof rssi !== "number") return null;
+  return Math.max(0, Math.min(100, Math.round(((rssi + 100) / 50) * 100)));
 }
 
 function requestQuality(quality) {
   const nextIdx = qualityList.indexOf(quality);
-  if (nextIdx >= 0) {
-    resIdx = nextIdx;
-    resLabel.textContent = quality;
+  if (nextIdx >= 0) { resIdx = nextIdx; resLabel.textContent = quality; }
+  if (apModeActive) {
+    apPost("/api/control", { quality });
+  } else {
+    send({ type: "camera_quality", deviceId, quality });
   }
-  return send({
-    type: "camera_quality",
-    deviceId,
-    quality
-  });
-}
-
-function sendCtrl(throttle, steering) {
-  send({
-    type: "ctrl",
-    deviceId,
-    throttle,
-    steering
-  });
 }
 
 function getRemoteVideoUrl(id) {
@@ -482,48 +485,32 @@ function getRemoteVideoUrl(id) {
 }
 
 function setStreamUrl(nextUrl) {
-  if (nextUrl === streamUrl) {
-    return;
-  }
+  if (nextUrl === streamUrl) return;
   const oldUrl = streamUrl;
   streamUrl = nextUrl || "";
   streamEl.src = streamUrl;
-  if (oldUrl.startsWith("blob:")) {
-    URL.revokeObjectURL(oldUrl);
-  }
+  if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
 }
 
+// broker WebSocket 연결
 function connectWS() {
+  if (!brokerUrl) return;
   ws = new WebSocket(brokerUrl);
-  ws.onopen = () => {
-    wsReady = true;
-    connLabel.textContent = "broker on";
-  };
+  ws.onopen = () => { wsReady = true; connLabel.textContent = "broker on"; };
   ws.onclose = () => {
-    wsReady = false;
-    connLabel.textContent = "reconnecting";
-    setStreamUrl("");
-    setTimeout(connectWS, 1500);
+    wsReady = false; connLabel.textContent = "reconnecting";
+    setStreamUrl(""); setTimeout(connectWS, 1500);
   };
-  ws.onerror = () => {
-    connLabel.textContent = "socket error";
-  };
+  ws.onerror = () => { connLabel.textContent = "socket error"; };
   ws.onmessage = (event) => {
-    try {
-      handleMessage(JSON.parse(event.data));
-    } catch (_) {
-      connLabel.textContent = "bad packet";
-    }
+    try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
   };
 }
 
-function handleMessage(message) {
+function handleBrokerMessage(message) {
   if (message.type === "welcome") {
     if (Array.isArray(message.devices) && message.devices.length > 0) {
-      if (!message.devices.includes(deviceId)) {
-        // Follow the first online device when the preferred id is unavailable.
-        deviceId = message.devices[0];
-      }
+      if (!message.devices.includes(deviceId)) deviceId = message.devices[0];
       connLabel.textContent = "device online";
       setStreamUrl(getRemoteVideoUrl(deviceId));
     } else {
@@ -531,39 +518,25 @@ function handleMessage(message) {
     }
     return;
   }
-
-  if (message.type === "device_online") {
-    if (message.deviceId === deviceId) {
-      connLabel.textContent = "device online";
-      setStreamUrl(getRemoteVideoUrl(deviceId));
-    }
+  if (message.type === "device_online" && message.deviceId === deviceId) {
+    connLabel.textContent = "device online";
+    setStreamUrl(getRemoteVideoUrl(deviceId));
     return;
   }
-
   if (message.type === "device_offline" && message.deviceId === deviceId) {
     connLabel.textContent = "device offline";
     setStreamUrl("");
     return;
   }
-
   if (message.type === "status" && message.deviceId === deviceId) {
-    if (typeof message.batteryPct === "number") {
-      batVal.textContent = `${message.batteryPct}%`;
-    } else if (typeof message.batteryMv === "number") {
-      batVal.textContent = `${(message.batteryMv / 1000).toFixed(2)}V`;
-    } else {
-      batVal.textContent = "--";
-    }
-    const sigPercent = signalPercentFromRssi(message.rssi);
-    rssiVal.textContent = sigPercent !== null ? `${sigPercent}%` : "--%";
-    if (message.remoteVideoUrl) {
-      setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
-    } else if (message.localIp && message.streamPath) {
-      setStreamUrl(`http://${message.localIp}${message.streamPath}`);
-    }
+    if (typeof message.batteryPct === "number") batVal.textContent = `${message.batteryPct}%`;
+    else if (typeof message.batteryMv === "number") batVal.textContent = `${(message.batteryMv/1000).toFixed(2)}V`;
+    const sig = signalPercentFromRssi(message.rssi);
+    rssiVal.textContent = sig !== null ? `${sig}%` : "--%";
+    if (message.remoteVideoUrl) setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
+    else if (message.localIp && message.streamPath) setStreamUrl(`http://${message.localIp}${message.streamPath}`);
     return;
   }
-
   if (message.type === "audio" && message.deviceId === deviceId) {
     playAudioChunk(message);
   }
@@ -576,224 +549,215 @@ function cycleResolution() {
 function toggleMode() {
   driveMode = !driveMode;
   modeLabel.textContent = driveMode ? "조종 모드" : "감시 모드";
-  setButtonState(btnMode, !driveMode);
-  send({
-    type: "mode",
-    deviceId,
-    mode: driveMode ? "drive" : "monitor"
-  });
+  setButtonState(btnNet, !driveMode);  // NET 버튼 재활용 안함 - 별도 처리
+  sendMode(driveMode ? "drive" : "monitor");
 }
 
 function toggleLed() {
   ledOn = !ledOn;
   setButtonState(btnLed, ledOn);
-  send({
-    type: "led",
-    deviceId,
-    enabled: ledOn
-  });
+  sendLed(ledOn);
 }
 
 async function doSnap() {
-  if (snapshotInFlight) {
-    return;
-  }
+  if (snapshotInFlight) return;
   snapshotInFlight = true;
   btnSnap.classList.add("active");
   const restoreQuality = qualityList[resIdx];
-
   try {
-    if (!streamEl.src) {
-      return;
-    }
-
-    if (restoreQuality !== "UXGA") {
-      requestQuality("UXGA");
-      await wait(1400);
-    }
-
+    if (!streamEl.src) return;
+    if (restoreQuality !== "UXGA") { requestQuality("UXGA"); await wait(1400); }
     snapshotCanvas.width = streamEl.naturalWidth || 1280;
     snapshotCanvas.height = streamEl.naturalHeight || 720;
     const ctx = snapshotCanvas.getContext("2d");
     ctx.drawImage(streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
     snapshotCanvas.toBlob((blob) => {
-      if (!blob) {
-        return;
-      }
+      if (!blob) return;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
-      a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
-      a.click();
-      URL.revokeObjectURL(url);
+      a.href = url; a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g,"-")}.jpg`;
+      a.click(); URL.revokeObjectURL(url);
     }, "image/jpeg", 0.96);
-  } catch (_) {
-    // ignore browser snapshot failure
-  } finally {
-    if (restoreQuality !== "UXGA") {
-      requestQuality(restoreQuality);
-    }
+  } catch {} finally {
+    if (restoreQuality !== "UXGA") requestQuality(restoreQuality);
     snapshotInFlight = false;
-    window.setTimeout(() => btnSnap.classList.remove("active"), 180);
+    setTimeout(() => btnSnap.classList.remove("active"), 180);
   }
-
-  send({
-    type: "snapshot",
-    deviceId
-  });
 }
 
-async function talkStart() {
-  if (talkOn) {
-    return;
-  }
-  armAudioPlayback();
-  const ok = await ensureTalkCapture();
-  if (!ok) {
-    return;
-  }
-  talkOn = true;
-  talkAudioState.sentChunks = 0;
-  setButtonState(btnTalk, true);
-  send({
-    type: "talk",
-    deviceId,
-    enabled: true
-  });
+// ============================================================
+// WiFi 패널
+// ============================================================
+let selectedSsid = null;
+let savedPasswords = {}; // {ssid: password} — ESP32에서 내려줌
+let scanResults = [];
+
+function openWifiPanel() {
+  document.getElementById("wifi-overlay").classList.add("open");
+  document.getElementById("broker-hint").style.display = "block";
+  setWifiStatus("");
+  // 열릴 때 자동 스캔
+  doWifiScan();
 }
 
-async function talkEnd() {
-  if (!talkOn) {
-    return;
-  }
-  talkOn = false;
-  setButtonState(btnTalk, false);
-  send({
-    type: "talk",
-    deviceId,
-    enabled: false
-  });
-  await stopTalkCapture();
+function closeWifiPanel() {
+  document.getElementById("wifi-overlay").classList.remove("open");
 }
 
-async function toggleRec() {
-  if (recOn) {
-    recorderState.recorder?.stop();
-    return;
-  }
+function setWifiStatus(msg, type = "") {
+  const el = document.getElementById("wifi-status-msg");
+  el.textContent = msg;
+  el.className = type ? type : "";
+}
 
-  if (!streamEl.src) {
-    return;
-  }
+async function doWifiScan() {
+  const scanBtn = document.getElementById("wifi-scan-btn");
+  const list = document.getElementById("wifi-scan-list");
+  scanBtn.disabled = true;
+  scanBtn.innerHTML = '<span class="scan-spinner">⟳</span> 스캔 중...';
+  list.innerHTML = '<div style="color:rgba(255,255,255,0.3);font-size:12px;text-align:center;padding:12px">스캔 중...</div>';
+  setWifiStatus("");
 
   try {
-    const width = streamEl.naturalWidth || 640;
-    const height = streamEl.naturalHeight || 480;
-    snapshotCanvas.width = width;
-    snapshotCanvas.height = height;
-    const snapshotCtx = snapshotCanvas.getContext("2d");
-    recorderState.renderTimer = window.setInterval(() => {
-      try {
-        snapshotCtx.drawImage(streamEl, 0, 0, width, height);
-      } catch (_) {
-        // ignore transient draw failures
-      }
-    }, 100);
-
-    recorderState.stream = snapshotCanvas.captureStream(12);
-    if (audioState.mixDestination) {
-      const [audioTrack] = audioState.mixDestination.stream.getAudioTracks();
-      if (audioTrack) {
-        recorderState.stream.addTrack(audioTrack);
-      }
-    }
-    recorderState.chunks = [];
-    recorderState.recorder = new MediaRecorder(recorderState.stream, {
-      mimeType: "video/webm"
-    });
-    recorderState.recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        recorderState.chunks.push(event.data);
-      }
-    };
-    recorderState.recorder.onstop = () => {
-      if (recorderState.renderTimer) {
-        window.clearInterval(recorderState.renderTimer);
-        recorderState.renderTimer = null;
-      }
-      recorderState.stream?.getTracks().forEach((track) => track.stop());
-      const blob = new Blob(recorderState.chunks, { type: "video/webm" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `rc-record-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
-      a.click();
-      URL.revokeObjectURL(url);
-      recOn = false;
-      setButtonState(btnRec, false);
-      btnRec.textContent = "rec";
-      recorderState.stream = null;
-      recorderState.recorder = null;
-      recorderState.chunks = [];
-    };
-    recorderState.recorder.start();
-    recOn = true;
-    setButtonState(btnRec, true);
-    btnRec.textContent = "rec";
-  } catch (_) {
-    // ignore record failure
+    const res = await fetch(`${ESP32_BASE || ""}/api/wifi-scan`);
+    const data = await res.json();
+    scanResults = data.networks || [];
+    savedPasswords = data.saved || {};
+    renderScanList();
+  } catch {
+    list.innerHTML = '<div style="color:var(--red);font-size:12px;text-align:center;padding:12px">스캔 실패</div>';
+    setWifiStatus("스캔 실패 — ESP32에 연결되어 있는지 확인하세요", "err");
+  } finally {
+    scanBtn.disabled = false;
+    scanBtn.innerHTML = "📡 다시 스캔";
   }
 }
 
-const IMA_INDEX_TABLE = [
-  -1, -1, -1, -1, 2, 4, 6, 8,
-  -1, -1, -1, -1, 2, 4, 6, 8
-];
+function renderScanList() {
+  const list = document.getElementById("wifi-scan-list");
+  if (!scanResults.length) {
+    list.innerHTML = '<div style="color:rgba(255,255,255,0.3);font-size:12px;text-align:center;padding:12px">주변 Wi-Fi 없음</div>';
+    return;
+  }
+  list.innerHTML = "";
+  for (const net of scanResults) {
+    const hasSaved = !!savedPasswords[net.ssid];
+    const div = document.createElement("div");
+    div.className = "wifi-item";
+    div.innerHTML = `
+      <span class="wifi-item-ssid">${escHtml(net.ssid)}</span>
+      <span class="wifi-item-meta">
+        ${hasSaved ? '<span class="wifi-saved">저장됨</span>' : ""}
+        ${net.secure ? '<span class="wifi-lock">🔒</span>' : ""}
+        <span>${net.rssi ?? ""}dBm</span>
+      </span>`;
+    div.addEventListener("click", () => selectSsid(net.ssid, net.secure, hasSaved));
+    list.appendChild(div);
+  }
+}
 
-const IMA_STEP_TABLE = [
-  7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
-  19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
-  50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
-  130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
-  337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-  876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
-  2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
-  5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
-  15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
-];
+function selectSsid(ssid, secure, hasSaved) {
+  selectedSsid = ssid;
+  // 기존 selected 해제
+  document.querySelectorAll(".wifi-item").forEach(el => el.classList.remove("selected"));
+  event.currentTarget.classList.add("selected");
+
+  const pwRow = document.getElementById("wifi-pw-row");
+  const pwInput = document.getElementById("wifi-pw-input");
+  const connectBtn = document.getElementById("wifi-connect-btn");
+
+  if (hasSaved) {
+    // 저장된 비번 있음 → 비번 입력 숨김, 바로 연결 가능
+    pwRow.classList.remove("visible");
+    pwInput.value = "";
+    connectBtn.disabled = false;
+    connectBtn.textContent = `"${ssid}" 로 연결 (저장된 비번 사용)`;
+  } else if (secure) {
+    // 비번 필요
+    pwRow.classList.add("visible");
+    pwInput.value = "";
+    pwInput.focus();
+    connectBtn.disabled = false;
+    connectBtn.textContent = `"${ssid}" 로 연결`;
+  } else {
+    // 오픈 네트워크
+    pwRow.classList.remove("visible");
+    pwInput.value = "";
+    connectBtn.disabled = false;
+    connectBtn.textContent = `"${ssid}" 로 연결 (오픈)`;
+  }
+  setWifiStatus("");
+}
+
+async function doWifiConnect() {
+  if (!selectedSsid) return;
+  const pwInput = document.getElementById("wifi-pw-input");
+  const connectBtn = document.getElementById("wifi-connect-btn");
+  const password = pwInput.value;
+
+  connectBtn.disabled = true;
+  connectBtn.textContent = "연결 중...";
+  setWifiStatus("ESP32에 연결 요청 전송 중...");
+
+  try {
+    const res = await fetch(`${ESP32_BASE || ""}/api/wifi-connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ssid: selectedSsid,
+        password: password
+      })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      setWifiStatus("✅ 저장 완료. ESP32가 재부팅됩니다...", "ok");
+      connectBtn.textContent = "재부팅 중...";
+      setTimeout(() => {
+        // 재부팅 후 브로커 URL로 안내 (broker host 알 수 없으므로 안내만)
+        setWifiStatus("재부팅 완료 후 브로커 네트워크에서 접속하세요", "ok");
+        closeWifiPanel();
+      }, 4000);
+    } else {
+      setWifiStatus(`오류: ${data.reason || "연결 실패"}`, "err");
+      connectBtn.disabled = false;
+      connectBtn.textContent = `"${selectedSsid}" 로 연결`;
+    }
+  } catch {
+    setWifiStatus("ESP32 응답 없음. AP에 연결되어 있는지 확인하세요", "err");
+    connectBtn.disabled = false;
+    connectBtn.textContent = `"${selectedSsid}" 로 연결`;
+  }
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// ============================================================
+// ADPCM
+// ============================================================
+const IMA_INDEX_TABLE = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
+const IMA_STEP_TABLE = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
 
 function decodeBase64ToBytes(encoded) {
-  const raw = atob(encoded);
-  const bytes = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i += 1) {
-    bytes[i] = raw.charCodeAt(i);
-  }
+  const raw = atob(encoded); const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
   return bytes;
 }
-
 function encodeBytesToBase64(bytes) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  let b = ""; for (let i = 0; i < bytes.length; i++) b += String.fromCharCode(bytes[i]);
+  return btoa(b);
 }
 
 function decodeAdpcmChunk(bytes, sampleCount) {
-  if (!bytes.length || bytes.length < 4 || sampleCount <= 0) {
-    return new Float32Array(0);
-  }
-
+  if (!bytes.length || bytes.length < 4 || sampleCount <= 0) return new Float32Array(0);
   let predictor = (bytes[1] << 8) | bytes[0];
-  if (predictor & 0x8000) {
-    predictor -= 0x10000;
-  }
+  if (predictor & 0x8000) predictor -= 0x10000;
   let stepIndex = Math.max(0, Math.min(88, bytes[2] || 0));
   const output = new Float32Array(sampleCount);
   output[0] = predictor / 32768;
-
   let outIndex = 1;
-  for (let i = 4; i < bytes.length && outIndex < sampleCount; i += 1) {
+  for (let i = 4; i < bytes.length && outIndex < sampleCount; i++) {
     const packed = bytes[i];
     for (const nibble of [packed & 0x0f, (packed >> 4) & 0x0f]) {
       const step = IMA_STEP_TABLE[stepIndex];
@@ -801,76 +765,45 @@ function decodeAdpcmChunk(bytes, sampleCount) {
       if (nibble & 1) diff += step >> 2;
       if (nibble & 2) diff += step >> 1;
       if (nibble & 4) diff += step;
-
       predictor += (nibble & 8) ? -diff : diff;
       predictor = Math.max(-32768, Math.min(32767, predictor));
       stepIndex += IMA_INDEX_TABLE[nibble];
       stepIndex = Math.max(0, Math.min(88, stepIndex));
       output[outIndex++] = predictor / 32768;
-      if (outIndex >= sampleCount) {
-        break;
-      }
+      if (outIndex >= sampleCount) break;
     }
   }
-
   return output;
 }
 
 function encodeAdpcmChunk(samples) {
-  if (!samples.length) {
-    return new Uint8Array(0);
-  }
-
+  if (!samples.length) return new Uint8Array(0);
   let predictor = samples[0];
   let stepIndex = Math.max(0, Math.min(88, talkAudioState.stepIndex));
   const output = new Uint8Array(4 + Math.ceil(Math.max(0, samples.length - 1) / 2));
-  output[0] = predictor & 0xff;
-  output[1] = (predictor >> 8) & 0xff;
-  output[2] = stepIndex & 0xff;
-  output[3] = 0;
-
+  output[0] = predictor & 0xff; output[1] = (predictor >> 8) & 0xff;
+  output[2] = stepIndex & 0xff; output[3] = 0;
   let outIndex = 4;
   for (let i = 1; i < samples.length; i += 2) {
     let packed = 0;
-    for (let nibbleIndex = 0; nibbleIndex < 2; nibbleIndex += 1) {
-      const sample = samples[i + nibbleIndex];
-      if (typeof sample !== "number") {
-        continue;
-      }
-
+    for (let ni = 0; ni < 2; ni++) {
+      const sample = samples[i + ni];
+      if (typeof sample !== "number") continue;
       const step = IMA_STEP_TABLE[stepIndex];
-      let diff = sample - predictor;
-      let nibble = 0;
-      if (diff < 0) {
-        nibble = 8;
-        diff = -diff;
-      }
-
+      let diff = sample - predictor; let nibble = 0;
+      if (diff < 0) { nibble = 8; diff = -diff; }
       let delta = step >> 3;
-      if (diff >= step) {
-        nibble |= 4;
-        diff -= step;
-        delta += step;
-      }
-      if (diff >= (step >> 1)) {
-        nibble |= 2;
-        diff -= step >> 1;
-        delta += step >> 1;
-      }
-      if (diff >= (step >> 2)) {
-        nibble |= 1;
-        delta += step >> 2;
-      }
-
+      if (diff >= step) { nibble |= 4; diff -= step; delta += step; }
+      if (diff >= (step >> 1)) { nibble |= 2; diff -= step >> 1; delta += step >> 1; }
+      if (diff >= (step >> 2)) { nibble |= 1; delta += step >> 2; }
       predictor += (nibble & 8) ? -delta : delta;
       predictor = Math.max(-32768, Math.min(32767, predictor));
       stepIndex += IMA_INDEX_TABLE[nibble & 0x0f];
       stepIndex = Math.max(0, Math.min(88, stepIndex));
-      packed |= nibbleIndex === 0 ? nibble : (nibble << 4);
+      packed |= ni === 0 ? nibble : (nibble << 4);
     }
     output[outIndex++] = packed;
   }
-
   talkAudioState.stepIndex = stepIndex;
   return output;
 }
@@ -881,26 +814,20 @@ function flushTalkSamples(force = false) {
     const take = talkAudioState.pendingSamples.length >= chunkSize ? chunkSize : talkAudioState.pendingSamples.length;
     const chunk = talkAudioState.pendingSamples.splice(0, take);
     const encoded = encodeAdpcmChunk(chunk);
-    if (!encoded.length) {
-      continue;
-    }
-    send({
-      type: "talk_audio",
-      deviceId,
-      codec: "adpcm_ima",
-      sampleRate: audioState.sampleRate,
-      samples: chunk.length,
-      seq: talkAudioState.seq++,
-      payload: encodeBytesToBase64(encoded)
-    });
-    talkAudioState.sentChunks += 1;
-    if ((talkAudioState.sentChunks % 10) === 1) {
-      console.log("[TALK_AUDIO] sent", {
-        chunks: talkAudioState.sentChunks,
-        seq: talkAudioState.seq - 1,
-        samples: chunk.length
+    if (!encoded.length) continue;
+    // AP모드에서도 로컬 WebSocket(또는 HTTP)으로 전송
+    if (apModeActive) {
+      apPost("/api/talk-audio", {
+        codec: "adpcm_ima", sampleRate: audioState.sampleRate,
+        samples: chunk.length, seq: talkAudioState.seq++,
+        payload: encodeBytesToBase64(encoded)
       });
+    } else {
+      send({ type: "talk_audio", deviceId, codec: "adpcm_ima",
+        sampleRate: audioState.sampleRate, samples: chunk.length,
+        seq: talkAudioState.seq++, payload: encodeBytesToBase64(encoded) });
     }
+    talkAudioState.sentChunks++;
   }
 }
 
@@ -909,53 +836,33 @@ async function stopTalkCapture() {
   talkAudioState.processor?.disconnect();
   talkAudioState.source?.disconnect();
   talkAudioState.muteGain?.disconnect();
-  talkAudioState.stream?.getTracks().forEach((track) => track.stop());
-  if (talkAudioState.ctx) {
-    try {
-      await talkAudioState.ctx.close();
-    } catch (_) {
-      // ignore close failure
-    }
-  }
-  talkAudioState.ctx = null;
-  talkAudioState.stream = null;
-  talkAudioState.source = null;
-  talkAudioState.processor = null;
-  talkAudioState.muteGain = null;
-  talkAudioState.pendingSamples = [];
+  talkAudioState.stream?.getTracks().forEach(t => t.stop());
+  if (talkAudioState.ctx) { try { await talkAudioState.ctx.close(); } catch {} }
+  talkAudioState.ctx = null; talkAudioState.stream = null;
+  talkAudioState.source = null; talkAudioState.processor = null;
+  talkAudioState.muteGain = null; talkAudioState.pendingSamples = [];
 }
 
 async function ensureTalkCapture() {
-  if (talkAudioState.processor) {
-    return true;
-  }
-
+  if (talkAudioState.processor) return true;
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   try {
     talkAudioState.ctx = new AudioContextCtor({ sampleRate: audioState.sampleRate });
     await talkAudioState.ctx.resume();
     talkAudioState.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
     talkAudioState.source = talkAudioState.ctx.createMediaStreamSource(talkAudioState.stream);
     talkAudioState.processor = talkAudioState.ctx.createScriptProcessor(1024, 1, 1);
     talkAudioState.muteGain = talkAudioState.ctx.createGain();
     talkAudioState.muteGain.gain.value = 0;
-    talkAudioState.pendingSamples = [];
-    talkAudioState.stepIndex = 0;
+    talkAudioState.pendingSamples = []; talkAudioState.stepIndex = 0;
     talkAudioState.processor.onaudioprocess = (event) => {
-      if (!talkOn || !wsReady) {
-        return;
-      }
+      if (!talkOn) return;
+      if (!apModeActive && !wsReady) return;
       const input = event.inputBuffer.getChannelData(0);
-      for (let i = 0; i < input.length; i += 1) {
-        const sample = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
-        talkAudioState.pendingSamples.push(sample);
+      for (let i = 0; i < input.length; i++) {
+        talkAudioState.pendingSamples.push(Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767))));
       }
       flushTalkSamples(false);
     };
@@ -963,114 +870,161 @@ async function ensureTalkCapture() {
     talkAudioState.processor.connect(talkAudioState.muteGain);
     talkAudioState.muteGain.connect(talkAudioState.ctx.destination);
     return true;
-  } catch (_) {
-    await stopTalkCapture();
-    return false;
+  } catch {
+    await stopTalkCapture(); return false;
   }
 }
 
 async function ensureAudioContext(sampleRate = audioState.sampleRate) {
   if (!audioState.ctx || audioState.sampleRate !== sampleRate) {
-    if (audioState.ctx) {
-      await audioState.ctx.close();
-    }
+    if (audioState.ctx) await audioState.ctx.close();
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     audioState.sampleRate = sampleRate;
     audioState.ctx = new AudioContextCtor({ sampleRate });
     audioState.mixDestination = audioState.ctx.createMediaStreamDestination();
   }
-  if (audioState.ctx.state !== "running") {
-    await audioState.ctx.resume();
-  }
+  if (audioState.ctx.state !== "running") await audioState.ctx.resume();
 }
 
 function armAudioPlayback() {
   requestWakeLock();
-  if (audioState.enabled) {
-    return;
-  }
-  ensureAudioContext(audioState.sampleRate)
-    .then(() => {
-      audioState.enabled = true;
-      audioState.nextPlayAt = 0;
-    })
-    .catch(() => {});
+  if (audioState.enabled) return;
+  ensureAudioContext(audioState.sampleRate).then(() => {
+    audioState.enabled = true; audioState.nextPlayAt = 0;
+  }).catch(() => {});
 }
 
 function playAudioChunk(message) {
-  if (!audioState.enabled || !audioState.ctx || !message.payload) {
-    return;
-  }
-
-  const seq = Number(message.seq || 0);
-  audioState.lastSeqByDevice.set(message.deviceId || deviceId, seq);
-
+  if (!audioState.enabled || !audioState.ctx || !message.payload) return;
   const bytes = decodeBase64ToBytes(message.payload);
   const sampleRate = Number(message.sampleRate || 16000);
   const samples = decodeAdpcmChunk(bytes, Number(message.samples || 0));
-  if (!samples.length) {
-    return;
-  }
-
+  if (!samples.length) return;
   const ctx = audioState.ctx;
   const buffer = ctx.createBuffer(1, samples.length, sampleRate);
   buffer.getChannelData(0).set(samples);
-
   const now = ctx.currentTime;
-  if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04) {
+  if (!audioState.nextPlayAt || audioState.nextPlayAt < now - 0.04)
     audioState.nextPlayAt = now + audioState.targetLeadSeconds;
+  if (audioState.nextPlayAt - now > audioState.maxLeadSeconds) {
+    audioState.nextPlayAt = now + audioState.targetLeadSeconds; return;
   }
-
-  const queuedAhead = audioState.nextPlayAt - now;
-  if (queuedAhead > audioState.maxLeadSeconds) {
-    audioState.nextPlayAt = now + audioState.targetLeadSeconds;
-    return;
-  }
-
   const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(ctx.destination);
-  if (audioState.mixDestination) {
-    source.connect(audioState.mixDestination);
-  }
+  source.buffer = buffer; source.connect(ctx.destination);
+  if (audioState.mixDestination) source.connect(audioState.mixDestination);
   source.start(audioState.nextPlayAt);
   audioState.nextPlayAt += buffer.duration;
 }
 
-let joystickActive = false;
-let jCenterX = 0;
-let jCenterY = 0;
-let jMaxR = 0;
-let lastSendTime = 0;
+// AP모드 오디오 폴링 (ESP32가 오디오 SSE 또는 WebSocket 지원하면 교체 가능)
+let apAudioWs = null;
+function startApAudioWs() {
+  if (!isApOrLocal) return;
+  const wsUrl = `ws://${location.hostname}:81/`;
+  try {
+    apAudioWs = new WebSocket(wsUrl);
+    apAudioWs.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "audio") playAudioChunk(msg);
+      } catch {}
+    };
+    apAudioWs.onclose = () => {
+      setTimeout(startApAudioWs, 3000);
+    };
+  } catch {}
+}
+
+// ============================================================
+// TALK
+// ============================================================
+async function talkStart() {
+  if (talkOn) return;
+  armAudioPlayback();
+  const ok = await ensureTalkCapture();
+  if (!ok) return;
+  talkOn = true;
+  talkAudioState.sentChunks = 0;
+  setButtonState(btnTalk, true);
+  if (apModeActive) {
+    apPost("/api/control", { talk: true });
+  } else {
+    send({ type: "talk", deviceId, enabled: true });
+  }
+}
+
+async function talkEnd() {
+  if (!talkOn) return;
+  talkOn = false;
+  setButtonState(btnTalk, false);
+  if (apModeActive) {
+    apPost("/api/control", { talk: false });
+  } else {
+    send({ type: "talk", deviceId, enabled: false });
+  }
+  await stopTalkCapture();
+}
+
+// ============================================================
+// REC
+// ============================================================
+async function toggleRec() {
+  if (recOn) { recorderState.recorder?.stop(); return; }
+  if (!streamEl.src) return;
+  try {
+    const width = streamEl.naturalWidth || 640;
+    const height = streamEl.naturalHeight || 480;
+    snapshotCanvas.width = width; snapshotCanvas.height = height;
+    const snapshotCtx = snapshotCanvas.getContext("2d");
+    recorderState.renderTimer = setInterval(() => {
+      try { snapshotCtx.drawImage(streamEl, 0, 0, width, height); } catch {}
+    }, 100);
+    recorderState.stream = snapshotCanvas.captureStream(12);
+    if (audioState.mixDestination) {
+      const [audioTrack] = audioState.mixDestination.stream.getAudioTracks();
+      if (audioTrack) recorderState.stream.addTrack(audioTrack);
+    }
+    recorderState.chunks = [];
+    recorderState.recorder = new MediaRecorder(recorderState.stream, { mimeType: "video/webm" });
+    recorderState.recorder.ondataavailable = (e) => { if (e.data.size > 0) recorderState.chunks.push(e.data); };
+    recorderState.recorder.onstop = () => {
+      if (recorderState.renderTimer) { clearInterval(recorderState.renderTimer); recorderState.renderTimer = null; }
+      recorderState.stream?.getTracks().forEach(t => t.stop());
+      const blob = new Blob(recorderState.chunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `rc-record-${new Date().toISOString().replace(/[:.]/g,"-")}.webm`;
+      a.click(); URL.revokeObjectURL(url);
+      recOn = false; setButtonState(btnRec, false); btnRec.textContent = "REC";
+      recorderState.stream = null; recorderState.recorder = null; recorderState.chunks = [];
+    };
+    recorderState.recorder.start();
+    recOn = true; setButtonState(btnRec, true); btnRec.textContent = "REC";
+  } catch {}
+}
+
+// ============================================================
+// 조이스틱
+// ============================================================
+let joystickActive = false, jCenterX = 0, jCenterY = 0, jMaxR = 0, lastSendTime = 0;
 const SEND_INTERVAL = 30;
 
 function getJoystickBounds() {
   const r = outerEl.getBoundingClientRect();
   const ringRect = document.getElementById("joystick-ring").getBoundingClientRect();
-  jCenterX = r.left + r.width / 2;
-  jCenterY = r.top + r.height / 2;
+  jCenterX = r.left + r.width / 2; jCenterY = r.top + r.height / 2;
   jMaxR = ringRect.width / 2;
 }
 
 function joystickMove(cx, cy) {
-  if (!driveMode) {
-    return;
-  }
-  let dx = cx - jCenterX;
-  let dy = cy - jCenterY;
+  if (!driveMode) return;
+  let dx = cx - jCenterX, dy = cy - jCenterY;
   const dist = Math.hypot(dx, dy);
-  if (dist > jMaxR) {
-    dx *= jMaxR / dist;
-    dy *= jMaxR / dist;
-  }
-
+  if (dist > jMaxR) { dx *= jMaxR / dist; dy *= jMaxR / dist; }
   knob.style.transform = `translate(${dx}px, ${dy}px)`;
-
   const now = Date.now();
   if (now - lastSendTime >= SEND_INTERVAL) {
-    const steering = Math.round((dx / jMaxR) * 100);
-    const throttle = Math.round((-dy / jMaxR) * 100);
-    sendCtrl(throttle, steering);
+    sendCtrl(Math.round((-dy / jMaxR) * 100), Math.round((dx / jMaxR) * 100));
     lastSendTime = now;
   }
 }
@@ -1079,107 +1033,75 @@ function joystickReset() {
   joystickActive = false;
   knob.style.transition = "transform 0.2s";
   knob.style.transform = "translate(0,0)";
-  setTimeout(() => {
-    knob.style.transition = "";
-  }, 200);
+  setTimeout(() => { knob.style.transition = ""; }, 200);
   sendCtrl(0, 0);
 }
 
 outerEl.addEventListener("touchstart", (e) => {
-  e.preventDefault();
-  armAudioPlayback();
-  getJoystickBounds();
-  if (!driveMode) {
-    return;
-  }
-  joystickActive = true;
-  joystickMove(e.touches[0].clientX, e.touches[0].clientY);
+  e.preventDefault(); armAudioPlayback(); getJoystickBounds();
+  if (!driveMode) return;
+  joystickActive = true; joystickMove(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: false });
-
 outerEl.addEventListener("touchmove", (e) => {
   e.preventDefault();
-  if (joystickActive) {
-    joystickMove(e.touches[0].clientX, e.touches[0].clientY);
-  }
+  if (joystickActive) joystickMove(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: false });
-
 outerEl.addEventListener("touchend", joystickReset);
 outerEl.addEventListener("touchcancel", joystickReset);
-
 outerEl.addEventListener("mousedown", (e) => {
-  armAudioPlayback();
-  getJoystickBounds();
-  if (!driveMode) {
-    return;
-  }
-  joystickActive = true;
-  joystickMove(e.clientX, e.clientY);
+  armAudioPlayback(); getJoystickBounds();
+  if (!driveMode) return;
+  joystickActive = true; joystickMove(e.clientX, e.clientY);
 });
-
 window.addEventListener("resize", getJoystickBounds);
 document.addEventListener("pointerdown", armAudioPlayback, { passive: true });
 document.addEventListener("keydown", armAudioPlayback);
+window.addEventListener("mousemove", (e) => { if (joystickActive) joystickMove(e.clientX, e.clientY); });
+window.addEventListener("mouseup", () => { if (joystickActive) joystickReset(); });
 
-window.addEventListener("mousemove", (e) => {
-  if (joystickActive) {
-    joystickMove(e.clientX, e.clientY);
-  }
-});
-
-window.addEventListener("mouseup", () => {
-  if (joystickActive) {
-    joystickReset();
-  }
-});
-
-btnLed.addEventListener("click", () => {
-  armAudioPlayback();
-  toggleLed();
-});
-
-btnMode.addEventListener("click", () => {
-  armAudioPlayback();
-  toggleMode();
-});
-
-btnSnap.addEventListener("click", () => {
-  armAudioPlayback();
-  doSnap();
-});
-
-btnTalk.addEventListener("pointerdown", () => {
-  armAudioPlayback();
-  talkStart();
-});
+// ============================================================
+// 버튼 이벤트
+// ============================================================
+btnLed.addEventListener("click", () => { armAudioPlayback(); toggleLed(); });
+btnNet.addEventListener("click", () => { armAudioPlayback(); openWifiPanel(); });
+btnSnap.addEventListener("click", () => { armAudioPlayback(); doSnap(); });
+btnTalk.addEventListener("pointerdown", () => { armAudioPlayback(); talkStart(); });
 btnTalk.addEventListener("pointerup", talkEnd);
 btnTalk.addEventListener("pointercancel", talkEnd);
 btnTalk.addEventListener("pointerleave", talkEnd);
-
-btnRec.addEventListener("click", () => {
-  armAudioPlayback();
-  toggleRec();
-});
+btnRec.addEventListener("click", () => { armAudioPlayback(); toggleRec(); });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {
-    talkEnd();
-    setStreamUrl("");
-    releaseWakeLock();
-  } else {
-    requestWakeLock();
-    if (deviceId) {
-      setStreamUrl(getRemoteVideoUrl(deviceId));
-    }
-  }
+  if (document.hidden) { talkEnd(); setStreamUrl(""); releaseWakeLock(); }
+  else { requestWakeLock(); if (!apModeActive && deviceId) setStreamUrl(getRemoteVideoUrl(deviceId)); }
 });
+window.addEventListener("pagehide", () => { talkEnd(); setStreamUrl(""); releaseWakeLock(); });
 
-window.addEventListener("pagehide", () => {
-  talkEnd();
-  setStreamUrl("");
-  releaseWakeLock();
-});
-
-connectWS();
+// ============================================================
+// 초기화
+// ============================================================
+if (isApOrLocal) {
+  // AP / 로컬 STA 모드
+  connLabel.textContent = "AP 모드";
+  let jpgTimer = 0;
+  const refreshJpg = () => {
+    window.clearTimeout(jpgTimer);
+    setStreamUrl(`http://${location.host}/jpg?ts=${Date.now()}`);
+  };
+  streamEl.addEventListener("load", () => {
+    if (apModeActive) jpgTimer = window.setTimeout(refreshJpg, 180);
+  });
+  streamEl.addEventListener("error", () => {
+    if (apModeActive) jpgTimer = window.setTimeout(refreshJpg, 600);
+  });
+  refreshJpg();
+  startApStatusPoll();
+  startApAudioWs();
+} else {
+  // broker 모드
+  apBanner.classList.remove("visible");
+  connectWS();
+}
 </script>
 </body>
 </html>
