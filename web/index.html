@@ -336,6 +336,7 @@ let driveMode = true;
 let resIdx = 0;
 let ledOn = false;
 let talkOn = false;
+let talkPointerId = null;
 let recOn = false;
 let streamUrl = "";
 let snapshotInFlight = false;
@@ -953,9 +954,20 @@ async function talkStart() {
   }
 }
 
+function beginTalkPress(event) {
+  event.preventDefault();
+  armAudioPlayback();
+  talkPointerId = event.pointerId ?? null;
+  if (typeof btnTalk.setPointerCapture === "function" && event.pointerId != null) {
+    try { btnTalk.setPointerCapture(event.pointerId); } catch {}
+  }
+  talkStart();
+}
+
 async function talkEnd() {
   if (!talkOn) return;
   talkOn = false;
+  talkPointerId = null;
   setButtonState(btnTalk, false);
   if (apModeActive) {
     apPost("/api/control", { talk: false });
@@ -1065,16 +1077,24 @@ window.addEventListener("mouseup", () => { if (joystickActive) joystickReset(); 
 btnLed.addEventListener("click", () => { armAudioPlayback(); toggleLed(); });
 btnNet.addEventListener("click", () => { armAudioPlayback(); openWifiPanel(); });
 btnSnap.addEventListener("click", () => { armAudioPlayback(); doSnap(); });
-btnTalk.addEventListener("pointerdown", () => { armAudioPlayback(); talkStart(); });
-btnTalk.addEventListener("pointerup", talkEnd);
+btnTalk.addEventListener("pointerdown", beginTalkPress);
+btnTalk.addEventListener("pointerup", (event) => {
+  if (talkPointerId === null || event.pointerId === talkPointerId) {
+    talkEnd();
+  }
+});
 btnTalk.addEventListener("pointercancel", talkEnd);
 btnTalk.addEventListener("pointerleave", talkEnd);
+btnTalk.addEventListener("lostpointercapture", talkEnd);
+btnTalk.addEventListener("contextmenu", (event) => event.preventDefault());
 btnRec.addEventListener("click", () => { armAudioPlayback(); toggleRec(); });
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) { talkEnd(); setStreamUrl(""); releaseWakeLock(); }
   else { requestWakeLock(); if (!apModeActive && deviceId) setStreamUrl(getRemoteVideoUrl(deviceId)); }
 });
+window.addEventListener("pointerup", talkEnd);
+window.addEventListener("blur", talkEnd);
 window.addEventListener("pagehide", () => { talkEnd(); setStreamUrl(""); releaseWakeLock(); });
 
 // ============================================================

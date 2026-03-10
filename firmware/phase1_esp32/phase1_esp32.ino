@@ -727,6 +727,7 @@ bool initCamera() {
     sensor->set_brightness(sensor, 0);
     sensor->set_saturation(sensor, 0);
     sensor->set_hmirror(sensor, 0);
+    sensor->set_vflip(sensor, 1);
   }
 
   Serial.println("[CAM] ready");
@@ -910,14 +911,18 @@ void handleConfigSave() {
 void handleJpeg() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (fb == nullptr) {
+    Serial.println("[CAM] /jpg frame unavailable");
     cameraServer.send(503, "text/plain", "camera frame unavailable");
     return;
   }
 
-  cameraServer.sendHeader("Content-Type", "image/jpeg");
-  cameraServer.sendHeader("Content-Length", String(fb->len));
-  cameraServer.send(200);
+  Serial.printf("[CAM] /jpg %u bytes\n", fb->len);
   WiFiClient client = cameraServer.client();
+  client.print("HTTP/1.1 200 OK\r\n");
+  client.print("Content-Type: image/jpeg\r\n");
+  client.print("Cache-Control: no-cache, no-store, must-revalidate\r\n");
+  client.printf("Content-Length: %u\r\n", fb->len);
+  client.print("Connection: close\r\n\r\n");
   client.write(fb->buf, fb->len);
   esp_camera_fb_return(fb);
 }
