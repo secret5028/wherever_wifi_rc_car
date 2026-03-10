@@ -6,6 +6,7 @@
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
 #include <libb64/cencode.h>
+#include <memory>
 #include <Preferences.h>
 #include <ESP32Servo.h>
 #include <mbedtls/base64.h>
@@ -26,6 +27,8 @@ I2SClass microphone;
 I2SClass speaker;
 Preferences preferences;
 Servo steeringServo;
+SemaphoreHandle_t latestFrameMutex = nullptr;
+TaskHandle_t cameraCaptureTaskHandle = nullptr;
 
 constexpr unsigned long WIFI_RETRY_MS = 5000;
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -37,6 +40,7 @@ constexpr unsigned long RESTART_DELAY_MS = 3000;
 constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
+constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
@@ -76,12 +80,14 @@ bool apMode = false;
 bool serverStarted = false;
 bool hasStoredWifi = false;
 bool localAudioWsStarted = false;
+bool cameraCaptureTaskStarted = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
 int lastSteering = 0;
 uint32_t audioSequence = 0;
 uint32_t talkAudioSequence = 0;
+uint32_t latestFrameSequence = 0;
 int32_t audioHighpassState = 0;
 int32_t audioHighpassLastInput = 0;
 int16_t audioAdpcmPredictor = 0;
@@ -151,6 +157,8 @@ char audioBase64Buffer[AUDIO_BASE64_BUFFER_LEN] = {};
 uint8_t audioDecodeBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
 int16_t audioPlaybackBuffer[AUDIO_STREAM_SAMPLES] = {};
 uint8_t speakerFrameBuffer[AUDIO_STREAM_SAMPLES * 4] = {};
+uint8_t* latestJpegFrame = nullptr;
+size_t latestJpegFrameLen = 0;
 
 constexpr int8_t IMA_INDEX_TABLE[16] = {
   -1, -1, -1, -1, 2, 4, 6, 8,
@@ -197,6 +205,9 @@ void handleWifiScan();
 void handleWifiConnect();
 void handleTalkAudio();
 void playSpeakerBootTone();
+void startCameraCaptureTask();
+void cameraCaptureTask(void* arg);
+bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen);
 size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
 size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
 void playSpeakerSamples(const int16_t* samples, size_t sampleCount);
@@ -814,6 +825,7 @@ void handleRoot() {
 
 
 void handleStatusJson() {
+  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
   StaticJsonDocument<192> doc;
   doc["apMode"] = apMode;
   doc["ip"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
@@ -907,23 +919,100 @@ void handleConfigSave() {
   restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
 }
 
+void startCameraCaptureTask() {
+  if (!cameraReady || cameraCaptureTaskStarted) {
+    return;
+  }
+  if (latestFrameMutex == nullptr) {
+    latestFrameMutex = xSemaphoreCreateMutex();
+    if (latestFrameMutex == nullptr) {
+      Serial.println("[CAM] frame mutex init failed");
+      return;
+    }
+  }
+  BaseType_t rc = xTaskCreatePinnedToCore(
+    cameraCaptureTask, "camera_capture", 6144, nullptr, 1, &cameraCaptureTaskHandle, 0
+  );
+  if (rc != pdPASS) {
+    Serial.println("[CAM] capture task start failed");
+    return;
+  }
+  cameraCaptureTaskStarted = true;
+  Serial.println("[CAM] capture task started");
+}
+
+void cameraCaptureTask(void* arg) {
+  (void)arg;
+  for (;;) {
+    if (!cameraReady) {
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
+
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb == nullptr) {
+      Serial.println("[CAM] capture task frame unavailable");
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    auto nextFrame = std::make_unique<uint8_t[]>(fb->len);
+    if (nextFrame) {
+      memcpy(nextFrame.get(), fb->buf, fb->len);
+      if (latestFrameMutex != nullptr && xSemaphoreTake(latestFrameMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        delete[] latestJpegFrame;
+        latestJpegFrame = nextFrame.release();
+        latestJpegFrameLen = fb->len;
+        latestFrameSequence++;
+        xSemaphoreGive(latestFrameMutex);
+      }
+    }
+    esp_camera_fb_return(fb);
+    vTaskDelay(pdMS_TO_TICKS(CAMERA_CAPTURE_INTERVAL_MS));
+  }
+}
+
+bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen) {
+  frameLen = 0;
+  if (latestFrameMutex == nullptr) {
+    return false;
+  }
+  if (xSemaphoreTake(latestFrameMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+    return false;
+  }
+  if (latestJpegFrame == nullptr || latestJpegFrameLen == 0) {
+    xSemaphoreGive(latestFrameMutex);
+    return false;
+  }
+
+  frameLen = latestJpegFrameLen;
+  frameCopy = std::make_unique<uint8_t[]>(frameLen);
+  if (frameCopy) {
+    memcpy(frameCopy.get(), latestJpegFrame, frameLen);
+  } else {
+    frameLen = 0;
+  }
+  xSemaphoreGive(latestFrameMutex);
+  return frameLen > 0;
+}
+
 void handleJpeg() {
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (fb == nullptr) {
-    Serial.println("[CAM] /jpg frame unavailable");
+  std::unique_ptr<uint8_t[]> frameCopy;
+  size_t frameLen = 0;
+  if (!copyLatestJpegFrame(frameCopy, frameLen)) {
+    Serial.println("[CAM] /jpg cached frame unavailable");
     cameraServer.send(503, "text/plain", "camera frame unavailable");
     return;
   }
 
-  Serial.printf("[CAM] /jpg %u bytes\n", fb->len);
+  Serial.printf("[CAM] /jpg %u bytes\n", static_cast<unsigned>(frameLen));
   WiFiClient client = cameraServer.client();
   client.print("HTTP/1.1 200 OK\r\n");
   client.print("Content-Type: image/jpeg\r\n");
   client.print("Cache-Control: no-cache, no-store, must-revalidate\r\n");
-  client.printf("Content-Length: %u\r\n", fb->len);
+  client.printf("Content-Length: %u\r\n", static_cast<unsigned>(frameLen));
   client.print("Connection: close\r\n\r\n");
-  client.write(fb->buf, fb->len);
-  esp_camera_fb_return(fb);
+  client.write(frameCopy.get(), frameLen);
 }
 
 void handleStream() {
@@ -936,16 +1025,16 @@ void handleStream() {
   cameraServer.sendContent("Connection: close\r\n\r\n");
 
   while (client.connected()) {
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (fb == nullptr) {
-      Serial.println("[CAM] frame failed");
-      break;
+    std::unique_ptr<uint8_t[]> frameCopy;
+    size_t frameLen = 0;
+    if (!copyLatestJpegFrame(frameCopy, frameLen)) {
+      delay(40);
+      continue;
     }
 
-    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-    client.write(fb->buf, fb->len);
+    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", static_cast<unsigned>(frameLen));
+    client.write(frameCopy.get(), frameLen);
     client.print("\r\n");
-    esp_camera_fb_return(fb);
 
     if (!client.connected()) {
       break;
@@ -958,10 +1047,6 @@ void handleTalkAudio() {
   cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
   if (!speakerReady) {
     cameraServer.send(503, "application/json", "{\"ok\":false,\"reason\":\"speaker_not_ready\"}");
-    return;
-  }
-  if (!talkEnabled) {
-    cameraServer.send(409, "application/json", "{\"ok\":false,\"reason\":\"talk_disabled\"}");
     return;
   }
 
@@ -988,18 +1073,27 @@ void handleTalkAudio() {
 }
 
 void handleWifiScan() {
-  // CORS 허용
   cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+  int scanResult = WiFi.scanComplete();
 
-  // Wi-Fi 스캔 (blocking, 최대 3초)
-  int n = WiFi.scanNetworks(false, false, false, 300);
+  if (scanResult == WIFI_SCAN_FAILED) {
+    WiFi.scanNetworks(true, false, false, 300);
+    cameraServer.send(202, "application/json", "{\"scanning\":true}");
+    Serial.println("[SCAN] started async scan");
+    return;
+  }
 
-  // 응답 JSON 구성 (DynamicJsonDocument로 넉넉하게)
+  if (scanResult == WIFI_SCAN_RUNNING) {
+    cameraServer.send(202, "application/json", "{\"scanning\":true}");
+    return;
+  }
+
   DynamicJsonDocument doc(2048);
+  doc["scanning"] = false;
   JsonArray networks = doc.createNestedArray("networks");
 
-  if (n > 0) {
-    for (int i = 0; i < n && i < 20; i++) {
+  if (scanResult > 0) {
+    for (int i = 0; i < scanResult && i < 20; i++) {
       JsonObject net = networks.createNestedObject();
       net["ssid"]   = WiFi.SSID(i);
       net["rssi"]   = WiFi.RSSI(i);
@@ -1008,7 +1102,6 @@ void handleWifiScan() {
   }
   WiFi.scanDelete();
 
-  // saved passwords map
   JsonObject saved = doc.createNestedObject("saved");
   for (uint8_t i = 0; i < rememberedWifiCount; i++) {
     saved[rememberedSsids[i]] = rememberedPasswords[i];
@@ -1017,7 +1110,7 @@ void handleWifiScan() {
   String payload;
   serializeJson(doc, payload);
   cameraServer.send(200, "application/json", payload);
-  Serial.printf("[SCAN] found %d networks\n", n);
+  Serial.printf("[SCAN] returned %d networks\n", scanResult);
 }
 
 void handleWifiConnect() {
@@ -1068,14 +1161,14 @@ void uploadVideoFrameIfNeeded() {
     return;
   }
 
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (fb == nullptr) {
-    Serial.println("[CAM] upload frame unavailable");
+  std::unique_ptr<uint8_t[]> frameCopy;
+  size_t frameLen = 0;
+  if (!copyLatestJpegFrame(frameCopy, frameLen)) {
+    Serial.println("[CAM] upload cached frame unavailable");
     return;
   }
 
-  bool sent = ws.sendBIN(fb->buf, fb->len);
-  esp_camera_fb_return(fb);
+  bool sent = ws.sendBIN(frameCopy.get(), frameLen);
 
   if (sent) {
     lastVideoUploadAt = current;
@@ -1407,6 +1500,7 @@ void setup() {
   Serial.println("\n[BOOT] Phase 1 firmware");
   safeStop();
   cameraReady = initCamera();
+  startCameraCaptureTask();
   initActuators();
   microphoneReady = initMicrophone();
   speakerReady = initSpeaker();

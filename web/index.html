@@ -47,26 +47,30 @@
     transform: scaleX(-1);
   }
   #stream[src=""] { opacity: 0; }
+  #stream-canvas {
+    width: 100%; height: 100%; display: none;
+    position: relative; z-index: 1; background: #111;
+    transform: scaleX(-1);
+  }
+  #stream-canvas.visible { display: block; }
 
   #hud {
     position: absolute; top: 0; left: 0; right: 0;
-    padding: 8px 10px; display: flex; justify-content: space-between;
+    padding: 6px 8px; display: flex; justify-content: flex-start;
     align-items: flex-start; pointer-events: none; z-index: 2;
   }
-  #hud-left, #hud-right {
+  #hud-left {
     background: var(--hud); backdrop-filter: blur(4px);
-    border-radius: 6px; padding: 5px 8px; font-size: 11px;
-    color: #fff; line-height: 1.6; border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 5px; padding: 3px 6px; font-size: 8px;
+    color: #fff; line-height: 1.2; border: 1px solid rgba(255,255,255,0.15);
+    display: inline-flex; align-items: center; gap: 8px;
+    letter-spacing: 0.3px;
   }
-  #hud-left span { display: block; }
-  #hud-right {
-    pointer-events: all; cursor: pointer;
-    transition: background 0.2s; text-align: right;
-  }
-  #hud-right:active { background: rgba(255,255,255,0.25); }
+  #hud-left span { display: inline; white-space: nowrap; }
   .bat-val { color: var(--green); }
   .rssi-val { color: var(--blue); }
-  .mode-val { color: #fef08a; }
+  .res-val { color: #fef08a; }
+  .hud-hidden { display: none !important; }
 
   /* AP모드 배너 */
   #ap-banner {
@@ -253,14 +257,13 @@
 
   <div id="stream-wrap">
     <img id="stream" src="" alt="stream" crossorigin="anonymous">
+    <canvas id="stream-canvas"></canvas>
     <div id="hud">
       <div id="hud-left">
-        <span>BAT : <span class="bat-val" id="bat-val">--%</span></span>
-        <span>SIG : <span class="rssi-val" id="rssi-val">--%</span></span>
-      </div>
-      <div id="hud-right" onclick="cycleResolution()">
-        <span id="res-label">QVGA</span><br>
-        <span class="mode-val" id="conn-label">connecting</span>
+        <span>BAT : <span class="bat-val" id="bat-val">0%</span></span>
+        <span>SIG : <span class="rssi-val" id="rssi-val">100%</span></span>
+        <span class="res-val" id="res-label">QVGA</span>
+        <span class="hud-hidden" id="conn-label">connecting</span>
       </div>
     </div>
   </div>
@@ -326,6 +329,7 @@ const ESP32_BASE = isApOrLocal ? `http://${location.host}` : null;
 const brokerUrl = isApOrLocal ? null
   : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/client`;
 const defaultDeviceId = "rc-car-01";
+const DEFAULT_CAMERA_QUALITY = "QVGA";
 const queryDeviceId = new URLSearchParams(location.search).get("deviceId");
 let deviceId = (queryDeviceId && queryDeviceId.trim()) || defaultDeviceId;
 const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
@@ -333,7 +337,8 @@ const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 let ws = null;
 let wsReady = false;
 let driveMode = true;
-let resIdx = 0;
+let resIdx = qualityList.indexOf(DEFAULT_CAMERA_QUALITY);
+if (resIdx < 0) resIdx = 0;
 let ledOn = false;
 let talkOn = false;
 let talkPointerId = null;
@@ -342,12 +347,16 @@ let streamUrl = "";
 let snapshotInFlight = false;
 let wakeLockSentinel = null;
 let apModeActive = isApOrLocal;
+let apVideoLoopActive = false;
+let defaultQualityApplied = false;
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
 apBanner.classList.toggle("visible", apModeActive);
 
 const streamEl = document.getElementById("stream");
+const streamCanvas = document.getElementById("stream-canvas");
+const streamCanvasCtx = streamCanvas.getContext("2d", { alpha: false });
 const connLabel = document.getElementById("conn-label");
 const batVal = document.getElementById("bat-val");
 const rssiVal = document.getElementById("rssi-val");
@@ -413,7 +422,8 @@ const audioState = {
 
 const talkAudioState = {
   ctx: null, stream: null, source: null, processor: null,
-  muteGain: null, pendingSamples: [], seq: 0, stepIndex: 0, sentChunks: 0
+  muteGain: null, pendingSamples: [], seq: 0, stepIndex: 0, sentChunks: 0,
+  captureSampleRate: 16000, targetSampleRate: 16000, uploadQueue: [], uploadInFlight: false
 };
 
 function setButtonState(button, active) {
@@ -481,6 +491,12 @@ function requestQuality(quality) {
   }
 }
 
+function ensureDefaultQuality() {
+  if (defaultQualityApplied) return;
+  defaultQualityApplied = true;
+  requestQuality(DEFAULT_CAMERA_QUALITY);
+}
+
 function getRemoteVideoUrl(id) {
   return `${location.origin}/video/${encodeURIComponent(id)}`;
 }
@@ -491,6 +507,45 @@ function setStreamUrl(nextUrl) {
   streamUrl = nextUrl || "";
   streamEl.src = streamUrl;
   if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
+}
+
+async function drawApFrame(blob) {
+  if (!blob || blob.size < 1024) return false;
+  const bitmap = await createImageBitmap(blob);
+  if (streamCanvas.width !== bitmap.width || streamCanvas.height !== bitmap.height) {
+    streamCanvas.width = bitmap.width;
+    streamCanvas.height = bitmap.height;
+  }
+  streamCanvasCtx.drawImage(bitmap, 0, 0, streamCanvas.width, streamCanvas.height);
+  bitmap.close();
+  return true;
+}
+
+async function startApVideoLoop() {
+  if (apVideoLoopActive) return;
+  apVideoLoopActive = true;
+  streamEl.style.display = "none";
+  streamCanvas.classList.add("visible");
+
+  while (apModeActive) {
+    try {
+      const res = await fetch(`${ESP32_BASE}/jpg?ts=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) {
+        await wait(80);
+        continue;
+      }
+      const blob = await res.blob();
+      const drawn = await drawApFrame(blob);
+      if (!drawn) {
+        await wait(40);
+      }
+    } catch {
+      connLabel.textContent = "video retry";
+      await wait(120);
+    }
+  }
+
+  apVideoLoopActive = false;
 }
 
 // broker WebSocket 연결
@@ -514,6 +569,7 @@ function handleBrokerMessage(message) {
       if (!message.devices.includes(deviceId)) deviceId = message.devices[0];
       connLabel.textContent = "device online";
       setStreamUrl(getRemoteVideoUrl(deviceId));
+      ensureDefaultQuality();
     } else {
       connLabel.textContent = "connected";
     }
@@ -522,6 +578,7 @@ function handleBrokerMessage(message) {
   if (message.type === "device_online" && message.deviceId === deviceId) {
     connLabel.textContent = "device online";
     setStreamUrl(getRemoteVideoUrl(deviceId));
+    ensureDefaultQuality();
     return;
   }
   if (message.type === "device_offline" && message.deviceId === deviceId) {
@@ -568,17 +625,27 @@ async function doSnap() {
   try {
     if (!streamEl.src) return;
     if (restoreQuality !== "UXGA") { requestQuality("UXGA"); await wait(1400); }
-    snapshotCanvas.width = streamEl.naturalWidth || 1280;
-    snapshotCanvas.height = streamEl.naturalHeight || 720;
-    const ctx = snapshotCanvas.getContext("2d");
-    ctx.drawImage(streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
-    snapshotCanvas.toBlob((blob) => {
-      if (!blob) return;
+    if (apModeActive) {
+      const res = await fetch(`${ESP32_BASE}/jpg?snap=${Date.now()}`, { cache: "no-store" });
+      const blob = await res.blob();
+      if (!blob || blob.size < 1024) return;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g,"-")}.jpg`;
       a.click(); URL.revokeObjectURL(url);
-    }, "image/jpeg", 0.96);
+    } else {
+      snapshotCanvas.width = streamEl.naturalWidth || 1280;
+      snapshotCanvas.height = streamEl.naturalHeight || 720;
+      const ctx = snapshotCanvas.getContext("2d");
+      ctx.drawImage(streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+      snapshotCanvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g,"-")}.jpg`;
+        a.click(); URL.revokeObjectURL(url);
+      }, "image/jpeg", 0.96);
+    }
   } catch {} finally {
     if (restoreQuality !== "UXGA") requestQuality(restoreQuality);
     snapshotInFlight = false;
@@ -620,8 +687,13 @@ async function doWifiScan() {
   setWifiStatus("");
 
   try {
-    const res = await fetch(`${ESP32_BASE || ""}/api/wifi-scan`);
-    const data = await res.json();
+    let data = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const res = await fetch(`${ESP32_BASE || ""}/api/wifi-scan`);
+      data = await res.json();
+      if (!data?.scanning) break;
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
     scanResults = data.networks || [];
     savedPasswords = data.saved || {};
     renderScanList();
@@ -809,6 +881,45 @@ function encodeAdpcmChunk(samples) {
   return output;
 }
 
+function resampleTalkSamples(floatSamples, inputRate, outputRate) {
+  if (!floatSamples.length) return [];
+  if (!inputRate || inputRate === outputRate) {
+    return Array.from(floatSamples, (sample) => Math.max(-32768, Math.min(32767, Math.round(sample * 32767))));
+  }
+
+  const ratio = inputRate / outputRate;
+  const outputLength = Math.max(1, Math.floor(floatSamples.length / ratio));
+  const output = new Array(outputLength);
+  let sourceIndex = 0;
+
+  for (let i = 0; i < outputLength; i++) {
+    const nextIndex = Math.min(floatSamples.length, Math.round((i + 1) * ratio));
+    let sum = 0;
+    let count = 0;
+    const endIndex = Math.max(sourceIndex + 1, nextIndex);
+    for (let j = sourceIndex; j < endIndex && j < floatSamples.length; j++) {
+      sum += floatSamples[j];
+      count++;
+    }
+    const averaged = count > 0 ? (sum / count) : floatSamples[Math.min(sourceIndex, floatSamples.length - 1)];
+    output[i] = Math.max(-32768, Math.min(32767, Math.round(averaged * 32767)));
+    sourceIndex = endIndex;
+  }
+
+  return output;
+}
+
+async function drainTalkUploadQueue() {
+  if (talkAudioState.uploadInFlight || !talkAudioState.uploadQueue.length) return;
+  talkAudioState.uploadInFlight = true;
+  while (talkAudioState.uploadQueue.length) {
+    const payload = talkAudioState.uploadQueue.shift();
+    const ok = await apPost("/api/talk-audio", payload);
+    if (!ok) break;
+  }
+  talkAudioState.uploadInFlight = false;
+}
+
 function flushTalkSamples(force = false) {
   const chunkSize = 640;
   while (talkAudioState.pendingSamples.length >= chunkSize || (force && talkAudioState.pendingSamples.length > 1)) {
@@ -818,14 +929,15 @@ function flushTalkSamples(force = false) {
     if (!encoded.length) continue;
     // AP모드에서도 로컬 WebSocket(또는 HTTP)으로 전송
     if (apModeActive) {
-      apPost("/api/talk-audio", {
-        codec: "adpcm_ima", sampleRate: audioState.sampleRate,
+      talkAudioState.uploadQueue.push({
+        codec: "adpcm_ima", sampleRate: talkAudioState.targetSampleRate,
         samples: chunk.length, seq: talkAudioState.seq++,
         payload: encodeBytesToBase64(encoded)
       });
+      drainTalkUploadQueue();
     } else {
       send({ type: "talk_audio", deviceId, codec: "adpcm_ima",
-        sampleRate: audioState.sampleRate, samples: chunk.length,
+        sampleRate: talkAudioState.targetSampleRate, samples: chunk.length,
         seq: talkAudioState.seq++, payload: encodeBytesToBase64(encoded) });
     }
     talkAudioState.sentChunks++;
@@ -842,14 +954,17 @@ async function stopTalkCapture() {
   talkAudioState.ctx = null; talkAudioState.stream = null;
   talkAudioState.source = null; talkAudioState.processor = null;
   talkAudioState.muteGain = null; talkAudioState.pendingSamples = [];
+  talkAudioState.uploadQueue = [];
+  talkAudioState.uploadInFlight = false;
 }
 
 async function ensureTalkCapture() {
   if (talkAudioState.processor) return true;
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   try {
-    talkAudioState.ctx = new AudioContextCtor({ sampleRate: audioState.sampleRate });
+    talkAudioState.ctx = new AudioContextCtor();
     await talkAudioState.ctx.resume();
+    talkAudioState.captureSampleRate = talkAudioState.ctx.sampleRate || talkAudioState.targetSampleRate;
     talkAudioState.stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
@@ -862,9 +977,8 @@ async function ensureTalkCapture() {
       if (!talkOn) return;
       if (!apModeActive && !wsReady) return;
       const input = event.inputBuffer.getChannelData(0);
-      for (let i = 0; i < input.length; i++) {
-        talkAudioState.pendingSamples.push(Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767))));
-      }
+      const resampled = resampleTalkSamples(input, talkAudioState.captureSampleRate, talkAudioState.targetSampleRate);
+      talkAudioState.pendingSamples.push(...resampled);
       flushTalkSamples(false);
     };
     talkAudioState.source.connect(talkAudioState.processor);
@@ -993,16 +1107,30 @@ async function talkEnd() {
 // ============================================================
 async function toggleRec() {
   if (recOn) { recorderState.recorder?.stop(); return; }
-  if (!streamEl.src) return;
+  const videoSource = apModeActive ? streamCanvas : streamEl;
+  const hasVideo = apModeActive
+    ? (streamCanvas.width > 0 && streamCanvas.height > 0)
+    : !!streamEl.src;
+  if (!hasVideo) return;
   try {
-    const width = streamEl.naturalWidth || 640;
-    const height = streamEl.naturalHeight || 480;
-    snapshotCanvas.width = width; snapshotCanvas.height = height;
-    const snapshotCtx = snapshotCanvas.getContext("2d");
-    recorderState.renderTimer = setInterval(() => {
-      try { snapshotCtx.drawImage(streamEl, 0, 0, width, height); } catch {}
-    }, 100);
-    recorderState.stream = snapshotCanvas.captureStream(12);
+    const width = apModeActive
+      ? (streamCanvas.width || 640)
+      : (streamEl.naturalWidth || 640);
+    const height = apModeActive
+      ? (streamCanvas.height || 480)
+      : (streamEl.naturalHeight || 480);
+
+    if (apModeActive) {
+      recorderState.stream = streamCanvas.captureStream(12);
+    } else {
+      snapshotCanvas.width = width; snapshotCanvas.height = height;
+      const snapshotCtx = snapshotCanvas.getContext("2d");
+      recorderState.renderTimer = setInterval(() => {
+        try { snapshotCtx.drawImage(videoSource, 0, 0, width, height); } catch {}
+      }, 100);
+      recorderState.stream = snapshotCanvas.captureStream(12);
+    }
+
     if (audioState.mixDestination) {
       const [audioTrack] = audioState.mixDestination.stream.getAudioTracks();
       if (audioTrack) recorderState.stream.addTrack(audioTrack);
@@ -1114,23 +1242,15 @@ window.addEventListener("pagehide", () => { talkEnd(); setStreamUrl(""); release
 if (isApOrLocal) {
   // AP / 로컬 STA 모드
   connLabel.textContent = "AP 모드";
-  let jpgTimer = 0;
-  const refreshJpg = () => {
-    window.clearTimeout(jpgTimer);
-    setStreamUrl(`http://${location.host}/jpg?ts=${Date.now()}`);
-  };
-  streamEl.addEventListener("load", () => {
-    if (apModeActive) jpgTimer = window.setTimeout(refreshJpg, 180);
-  });
-  streamEl.addEventListener("error", () => {
-    if (apModeActive) jpgTimer = window.setTimeout(refreshJpg, 600);
-  });
-  refreshJpg();
+  resLabel.textContent = DEFAULT_CAMERA_QUALITY;
+  ensureDefaultQuality();
+  startApVideoLoop();
   startApStatusPoll();
   startApAudioWs();
 } else {
   // broker 모드
   apBanner.classList.remove("visible");
+  resLabel.textContent = DEFAULT_CAMERA_QUALITY;
   connectWS();
 }
 </script>
