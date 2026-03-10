@@ -51,6 +51,24 @@
     position: relative; z-index: 1; background: #111;
   }
   #stream-canvas.visible { display: block; }
+  #talk-overlay {
+    position: absolute; inset: 0; z-index: 3;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(8, 12, 24, 0.72);
+    backdrop-filter: blur(3px);
+    color: #fef3c7;
+    font-family: "Orbitron", sans-serif;
+    font-size: 13px; letter-spacing: 2px; text-align: center;
+  }
+  #talk-overlay.visible { display: flex; }
+  #talk-overlay span {
+    display: inline-block;
+    padding: 10px 14px;
+    border: 1px solid rgba(249, 115, 22, 0.45);
+    border-radius: 10px;
+    background: rgba(146, 64, 14, 0.4);
+    box-shadow: 0 0 24px rgba(249, 115, 22, 0.18);
+  }
 
   #hud {
     position: absolute; top: 0; left: 0; right: 0;
@@ -256,6 +274,7 @@
   <div id="stream-wrap">
     <img id="stream" src="" alt="stream" crossorigin="anonymous">
     <canvas id="stream-canvas"></canvas>
+    <div id="talk-overlay"><span>TALK MODE<br>VOICE TO CAR</span></div>
     <div id="hud">
       <div id="hud-left">
         <span>BAT : <span class="bat-val" id="bat-val">0%</span></span>
@@ -359,6 +378,7 @@ apBanner.classList.toggle("visible", apModeActive);
 const streamEl = document.getElementById("stream");
 const streamCanvas = document.getElementById("stream-canvas");
 const streamCanvasCtx = streamCanvas.getContext("2d", { alpha: false });
+const talkOverlay = document.getElementById("talk-overlay");
 const connLabel = document.getElementById("conn-label");
 const batVal = document.getElementById("bat-val");
 const rssiVal = document.getElementById("rssi-val");
@@ -1077,6 +1097,7 @@ function pauseApMediaForTalk() {
   window.clearTimeout(apResumeAudioTimer);
   apVideoPaused = true;
   apAudioPaused = true;
+  talkOverlay.classList.add("visible");
   stopAudioPlayback();
   if (apAudioWs) {
     try { apAudioWs.close(); } catch {}
@@ -1088,6 +1109,7 @@ function resumeApMediaAfterTalk() {
   if (!apModeActive) return;
   window.clearTimeout(apResumeVideoTimer);
   window.clearTimeout(apResumeAudioTimer);
+  talkOverlay.classList.remove("visible");
   apResumeVideoTimer = window.setTimeout(() => {
     apVideoPaused = false;
     if (!apVideoLoopActive) startApVideoLoop();
