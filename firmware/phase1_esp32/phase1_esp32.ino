@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ESP_I2S.h>
+#include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
@@ -19,6 +20,7 @@
 namespace {
 WebSocketsClient ws;
 WebServer cameraServer(80);
+DNSServer dnsServer;
 I2SClass microphone;
 I2SClass speaker;
 Preferences preferences;
@@ -45,6 +47,7 @@ constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
 constexpr size_t AUDIO_ADPCM_HEADER_BYTES = 4;
 constexpr size_t AUDIO_ADPCM_PAYLOAD_BYTES = AUDIO_ADPCM_HEADER_BYTES + ((AUDIO_STREAM_SAMPLES - 1 + 1) / 2);
 constexpr size_t AUDIO_BASE64_BUFFER_LEN = 433;
+constexpr uint8_t DNS_PORT = 53;
 
 unsigned long lastWifiAttemptAt = 0;
 unsigned long wifiConnectStartedAt = 0;
@@ -189,6 +192,7 @@ void handleControlJson();
 void handleConfigSave();
 void handleJpeg();
 void handleStream();
+void redirectToCaptivePortal();
 void playSpeakerBootTone();
 size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
 size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
@@ -420,6 +424,8 @@ void startProvisioningAp() {
   delay(100);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWORD);
+  delay(100);
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
   apMode = true;
   wifiConnectInFlight = false;
   wsConnectInFlight = false;
@@ -524,6 +530,12 @@ void writeMotorOutput(int throttle) {
   }
 
   ledcWriteChannel(MOTOR_PWM_CHANNEL, duty);
+}
+
+void redirectToCaptivePortal() {
+  String location = String("http://") + WiFi.softAPIP().toString() + "/";
+  cameraServer.sendHeader("Location", location, true);
+  cameraServer.send(302, "text/plain", "");
 }
 
 void writeSteeringOutput(int steering) {
@@ -759,6 +771,21 @@ void startHttpServer() {
   cameraServer.on("/api/config", HTTP_POST, handleConfigSave);
   cameraServer.on("/jpg", HTTP_GET, handleJpeg);
   cameraServer.on("/stream", HTTP_GET, handleStream);
+  cameraServer.on("/generate_204", HTTP_GET, redirectToCaptivePortal);
+  cameraServer.on("/hotspot-detect.html", HTTP_GET, redirectToCaptivePortal);
+  cameraServer.on("/connecttest.txt", HTTP_GET, redirectToCaptivePortal);
+  cameraServer.on("/redirect", HTTP_GET, redirectToCaptivePortal);
+  cameraServer.on("/canonical.html", HTTP_GET, redirectToCaptivePortal);
+  cameraServer.on("/ncsi.txt", HTTP_GET, []() {
+    cameraServer.send(200, "text/plain", "Microsoft NCSI");
+  });
+  cameraServer.onNotFound([]() {
+    if (apMode) {
+      redirectToCaptivePortal();
+      return;
+    }
+    cameraServer.send(404, "text/plain", "Not found");
+  });
   cameraServer.begin();
   serverStarted = true;
   cameraServerStarted = true;
@@ -1342,6 +1369,9 @@ void loop() {
   ensureWifiConnected();
   if ((apMode || WiFi.isConnected()) && !serverStarted) {
     startHttpServer();
+  }
+  if (apMode) {
+    dnsServer.processNextRequest();
   }
   ensureWebSocketConnected();
   ws.loop();
