@@ -44,13 +44,11 @@
   #stream {
     width: 100%; height: 100%; object-fit: cover; display: block;
     position: relative; z-index: 1; background: #111;
-    transform: scaleX(-1);
   }
   #stream[src=""] { opacity: 0; }
   #stream-canvas {
     width: 100%; height: 100%; display: none;
     position: relative; z-index: 1; background: #111;
-    transform: scaleX(-1);
   }
   #stream-canvas.visible { display: block; }
 
@@ -349,6 +347,10 @@ let wakeLockSentinel = null;
 let apModeActive = isApOrLocal;
 let apVideoLoopActive = false;
 let defaultQualityApplied = false;
+let apVideoPaused = false;
+let apAudioPaused = false;
+let apResumeVideoTimer = 0;
+let apResumeAudioTimer = 0;
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
@@ -1044,9 +1046,12 @@ function playAudioChunk(message) {
 // AP모드 오디오 폴링 (ESP32가 오디오 SSE 또는 WebSocket 지원하면 교체 가능)
 let apAudioWs = null;
 function startApAudioWs() {
-  if (!isApOrLocal) return;
+  if (!isApOrLocal || apAudioPaused) return;
   const wsUrl = `ws://${location.hostname}:81/`;
   try {
+    if (apAudioWs && (apAudioWs.readyState === WebSocket.OPEN || apAudioWs.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
     apAudioWs = new WebSocket(wsUrl);
     apAudioWs.onmessage = (event) => {
       try {
@@ -1054,10 +1059,43 @@ function startApAudioWs() {
         if (msg.type === "audio") playAudioChunk(msg);
       } catch {}
     };
+    apAudioWs.onerror = () => {
+      try { apAudioWs?.close(); } catch {}
+    };
     apAudioWs.onclose = () => {
-      setTimeout(startApAudioWs, 3000);
+      apAudioWs = null;
+      if (!apAudioPaused && apModeActive) {
+        setTimeout(startApAudioWs, 3000);
+      }
     };
   } catch {}
+}
+
+function pauseApMediaForTalk() {
+  if (!apModeActive) return;
+  window.clearTimeout(apResumeVideoTimer);
+  window.clearTimeout(apResumeAudioTimer);
+  apVideoPaused = true;
+  apAudioPaused = true;
+  stopAudioPlayback();
+  if (apAudioWs) {
+    try { apAudioWs.close(); } catch {}
+    apAudioWs = null;
+  }
+}
+
+function resumeApMediaAfterTalk() {
+  if (!apModeActive) return;
+  window.clearTimeout(apResumeVideoTimer);
+  window.clearTimeout(apResumeAudioTimer);
+  apResumeVideoTimer = window.setTimeout(() => {
+    apVideoPaused = false;
+    if (!apVideoLoopActive) startApVideoLoop();
+  }, 250);
+  apResumeAudioTimer = window.setTimeout(() => {
+    apAudioPaused = false;
+    startApAudioWs();
+  }, 550);
 }
 
 // ============================================================
@@ -1065,10 +1103,14 @@ function startApAudioWs() {
 // ============================================================
 async function talkStart() {
   if (talkOn) return;
+  if (apModeActive) pauseApMediaForTalk();
   stopAudioPlayback();
   armAudioPlayback();
   const ok = await ensureTalkCapture();
-  if (!ok) return;
+  if (!ok) {
+    if (apModeActive) resumeApMediaAfterTalk();
+    return;
+  }
   talkOn = true;
   talkAudioState.sentChunks = 0;
   setButtonState(btnTalk, true);
@@ -1100,6 +1142,7 @@ async function talkEnd() {
     send({ type: "talk", deviceId, enabled: false });
   }
   await stopTalkCapture();
+  if (apModeActive) resumeApMediaAfterTalk();
 }
 
 // ============================================================
