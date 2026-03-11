@@ -1,3 +1,7 @@
+// ============================================================
+//  RC Car Firmware  –  XIAO ESP32-S3 Sense
+//  단순·안정 버전 (복잡한 복구 상태머신 제거)
+// ============================================================
 #include <Arduino.h>
 #include <ESP_I2S.h>
 #include <WebServer.h>
@@ -11,7 +15,6 @@
 #include <ESP32Servo.h>
 #include <mbedtls/base64.h>
 #include "esp_camera.h"
-
 #include "secrets.h"
 #include "web_index.h"
 
@@ -19,1844 +22,854 @@
 #define LED_BUILTIN -1
 #endif
 
+// ============================================================
+//  핀
+// ============================================================
 namespace {
-WebSocketsClient ws;
-WebServer cameraServer(80);
-WebSocketsServer localAudioWs(81);
-I2SClass microphone;
-I2SClass speaker;
-Preferences preferences;
-Servo steeringServo;
-SemaphoreHandle_t latestFrameMutex = nullptr;
-SemaphoreHandle_t wsMutex = nullptr;
-TaskHandle_t cameraCaptureTaskHandle = nullptr;
-TaskHandle_t videoUploadTaskHandle = nullptr;
 
-constexpr unsigned long WIFI_RETRY_MS = 5000;
-constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
-constexpr unsigned long STATUS_INTERVAL_MS = 2000;
-constexpr unsigned long PING_INTERVAL_MS = 10000;
-constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
-constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
-constexpr unsigned long RESTART_DELAY_MS = 3000;
-constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
-constexpr unsigned long AP_TO_BROKER_TRANSITION_MS = 500;
-constexpr unsigned long BROKER_UPLOAD_GRACE_MS = 5000;
-constexpr unsigned long BROKER_AUDIO_START_DELAY_MS = 10000;
-constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
-constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 80;
-constexpr unsigned long BROKER_AUDIO_FAIL_COOLDOWN_MS = 10000;
-constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
-constexpr uint8_t MAX_PING_FAILS = 3;
-constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
-constexpr uint8_t BROKER_RECOVERY_PING_FAILS = 2;
-constexpr uint8_t BROKER_RECOVERY_DISCONNECTS = 2;
-constexpr uint8_t BROKER_RECOVERY_WS_ERRORS = 2;
-constexpr uint8_t BROKER_RECOVERY_VIDEO_FAILS = 4;
-constexpr uint8_t BROKER_RECOVERY_AUDIO_FAILS = 6;
-constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
-constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
-constexpr uint32_t AUDIO_PLAYBACK_SAMPLE_RATE = 16000;
-constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
-constexpr size_t AUDIO_STREAM_SAMPLES = 640;
-constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
-constexpr size_t AUDIO_ADPCM_HEADER_BYTES = 4;
-constexpr size_t AUDIO_ADPCM_PAYLOAD_BYTES = AUDIO_ADPCM_HEADER_BYTES + ((AUDIO_STREAM_SAMPLES - 1 + 1) / 2);
-constexpr size_t AUDIO_BASE64_BUFFER_LEN = 433;
-constexpr int32_t AUDIO_HPF_ALPHA_NUM = 995;
-constexpr int32_t AUDIO_HPF_ALPHA_DEN = 1000;
-constexpr int32_t AUDIO_NOISE_GATE = 32;
-constexpr int32_t AUDIO_SOFTWARE_GAIN = 10;
+constexpr int PIN_CAM_PWDN=-1, PIN_CAM_RESET=-1;
+constexpr int PIN_CAM_XCLK=10, PIN_CAM_SIOD=40, PIN_CAM_SIOC=39;
+constexpr int PIN_CAM_D7=48,  PIN_CAM_D6=11, PIN_CAM_D5=12, PIN_CAM_D4=14;
+constexpr int PIN_CAM_D3=16,  PIN_CAM_D2=18, PIN_CAM_D1=17, PIN_CAM_D0=15;
+constexpr int PIN_CAM_VSYNC=38, PIN_CAM_HREF=47, PIN_CAM_PCLK=13;
+constexpr int PIN_MIC_CLK=42, PIN_MIC_DATA=41;
+constexpr int PIN_AMP_BCLK=7, PIN_AMP_WS=8, PIN_AMP_DIN=4;
+constexpr int PIN_MOTOR_PWM=2, PIN_SERVO=3;
+constexpr int PIN_MOTOR_A=5,   PIN_MOTOR_B=6;
+constexpr int PIN_LED=43,      PIN_BAT=1;
+constexpr uint8_t  MOTOR_CH   = 2;
+constexpr uint32_t MOTOR_FREQ = 200;
+constexpr uint8_t  MOTOR_BITS = 12;
 
-unsigned long lastWifiAttemptAt = 0;
-unsigned long wifiConnectStartedAt = 0;
-unsigned long lastStatusAt = 0;
-unsigned long lastPingAt = 0;
-unsigned long lastCommandAt = 0;
-unsigned long reconnectDelayMs = 1000;
-unsigned long nextReconnectAt = 0;
-unsigned long wsConnectStartedAt = 0;
-unsigned long wsConnectedAt = 0;
-unsigned long restartScheduledAt = 0;
-unsigned long brokerModeTransitionAt = 0;
-unsigned long lastVideoUploadAt = 0;
-unsigned long lastAudioUploadAt = 0;
-unsigned long brokerAudioMutedUntil = 0;
+// ============================================================
+//  타이밍 상수
+// ============================================================
+constexpr unsigned long WIFI_RETRY_MS    = 5000;
+constexpr unsigned long WIFI_TIMEOUT_MS  = 15000;
+constexpr unsigned long WS_TIMEOUT_MS    = 10000;
+constexpr unsigned long WS_RETRY_MIN     = 2000;
+constexpr unsigned long WS_RETRY_MAX     = 30000;
+constexpr unsigned long AP_DELAY_MS      = 600;
+constexpr unsigned long STATUS_MS        = 2000;
+constexpr unsigned long PING_MS          = 10000;
+constexpr unsigned long CMD_TIMEOUT_MS   = 1000;
+constexpr unsigned long VIDEO_MS         = 220;   // ~4.5fps
+constexpr unsigned long AUDIO_MS         = 80;
+constexpr unsigned long AUDIO_DELAY_MS   = 5000;  // 클라이언트 접속 후 오디오 시작 대기
+constexpr unsigned long VIDEO_GRACE_MS   = 3000;  // WS 연결 직후 그레이스
 
-bool wsConnected = false;
-bool wifiConnectInFlight = false;
-bool wsConnectInFlight = false;
-bool wsConfigured = false;
-bool cameraReady = false;
-bool cameraServerStarted = false;
-bool microphoneReady = false;
-bool speakerReady = false;
-bool driveMode = true;
-bool ledEnabled = false;
-bool talkEnabled = false;
-bool apMode = false;
-bool serverStarted = false;
-bool hasStoredWifi = false;
-bool localAudioWsStarted = false;
-bool cameraCaptureTaskStarted = false;
-bool videoUploadTaskStarted = false;
-bool brokerDisconnectLatched = false;
-bool brokerClientPresent = false;
-uint8_t pingFailCount = 0;
-uint8_t wifiFailureCount = 0;
-uint8_t brokerDisconnectCount = 0;
-uint8_t brokerWsErrorCount = 0;
-uint8_t brokerVideoFailCount = 0;
-uint8_t brokerAudioFailCount = 0;
-uint16_t brokerClientCount = 0;
-int lastThrottle = 0;
-int lastSteering = 0;
-uint32_t audioSequence = 0;
-uint32_t talkAudioSequence = 0;
-uint32_t latestFrameSequence = 0;
-int32_t audioHighpassState = 0;
-int32_t audioHighpassLastInput = 0;
-int16_t audioAdpcmPredictor = 0;
-int8_t audioAdpcmStepIndex = 0;
+// ============================================================
+//  오디오 상수
+// ============================================================
+constexpr uint32_t SRATE        = 16000;
+constexpr size_t   CHUNK        = 640;
+constexpr size_t   CHUNK_BYTES  = CHUNK * 2;
+constexpr size_t   ADPCM_HDR    = 4;
+constexpr size_t   ADPCM_BYTES  = ADPCM_HDR + (CHUNK / 2);
+constexpr size_t   B64_BYTES    = 433;
+constexpr int32_t  HPF_N        = 995, HPF_D = 1000;
+constexpr int32_t  NGATE        = 32, GAIN = 10;
+constexpr int      DRAIN_LIMIT  = 200;  // 버퍼 비우기 최대 블록
 
-constexpr int CAM_PIN_PWDN = -1;
-constexpr int CAM_PIN_RESET = -1;
-constexpr int CAM_PIN_XCLK = 10;
-constexpr int CAM_PIN_SIOD = 40;
-constexpr int CAM_PIN_SIOC = 39;
-constexpr int CAM_PIN_D7 = 48;
-constexpr int CAM_PIN_D6 = 11;
-constexpr int CAM_PIN_D5 = 12;
-constexpr int CAM_PIN_D4 = 14;
-constexpr int CAM_PIN_D3 = 16;
-constexpr int CAM_PIN_D2 = 18;
-constexpr int CAM_PIN_D1 = 17;
-constexpr int CAM_PIN_D0 = 15;
-constexpr int CAM_PIN_VSYNC = 38;
-constexpr int CAM_PIN_HREF = 47;
-constexpr int CAM_PIN_PCLK = 13;
-constexpr int MIC_PIN_CLK = 42;
-constexpr int MIC_PIN_DATA = 41;
-constexpr int MOTOR_PWM_PIN = 2;
-constexpr int SERVO_PWM_PIN = 3;
-constexpr int MOTOR_DIR1_PIN = 5;
-constexpr int MOTOR_DIR2_PIN = 6;
-constexpr int STATUS_LED_PIN = 43;
-constexpr int BATTERY_SENSE_PIN = 1;
-constexpr int AMP_BCLK_PIN = 7;
-constexpr int AMP_WS_PIN = 8;
-constexpr int AMP_DIN_PIN = 4;
-constexpr uint8_t MOTOR_PWM_CHANNEL = 2;
-constexpr uint32_t MOTOR_PWM_FREQ_HZ = 200;
-constexpr uint8_t MOTOR_PWM_RES_BITS = 12;
-constexpr uint32_t SERVO_PWM_FREQ_HZ = 50;
-constexpr uint8_t SERVO_PWM_RES_BITS = 16;
-constexpr int STEERING_MIN_US = 1100;
-constexpr int STEERING_CENTER_US = 1500;
-constexpr int STEERING_MAX_US = 1900;
-constexpr char PREF_NAMESPACE[] = "rc-car";
-constexpr char PREF_WIFI_SSID[] = "wifi_ssid";
-constexpr char PREF_WIFI_PASS[] = "wifi_pass";
-constexpr char PREF_BROKER_HOST[] = "broker_host";
-constexpr char PREF_BROKER_PORT[] = "broker_port";
-constexpr char PREF_DEVICE_ID[] = "device_id";
-constexpr char PREF_WIFI_MEMORY[] = "wifi_memory";
-constexpr char PREF_CONNECT_ONCE[] = "connect_once";
-constexpr char AP_SSID[] = "RC-Car-Setup";
-constexpr char AP_PASSWORD[] = "12345678";
-constexpr char DEFAULT_DEVICE_ID[] = "rc-car-01";
-constexpr uint8_t MAX_REMEMBERED_WIFI = 5;
+// NVS 키
+constexpr char NVS_NS[]   = "rc-car";
+constexpr char NVS_SSID[] = "wifi_ssid", NVS_PASS[] = "wifi_pass";
+constexpr char NVS_HOST[] = "broker_host", NVS_PORT[] = "broker_port";
+constexpr char NVS_ID[]   = "device_id",  NVS_MEM[]  = "wifi_memory";
+constexpr char AP_SSID[]  = "RC-Car-Setup", AP_PASS[] = "12345678";
+constexpr char DEF_ID[]   = "rc-car-01";
+constexpr uint8_t WIFI_MEM_MAX = 5;
+constexpr uint8_t WIFI_FAIL_BEFORE_AP = 3;
 
-String activeWifiSsid;
-String activeWifiPassword;
-String activeBrokerHost;
-uint16_t activeBrokerPort = BROKER_PORT;
-String activeDeviceId;
-String rememberedSsids[MAX_REMEMBERED_WIFI];
-String rememberedPasswords[MAX_REMEMBERED_WIFI];
-uint8_t rememberedWifiCount = 0;
-bool connectOnBoot = false;
-
-int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
-uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
-char audioBase64Buffer[AUDIO_BASE64_BUFFER_LEN] = {};
-uint8_t audioDecodeBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
-int16_t audioPlaybackBuffer[AUDIO_STREAM_SAMPLES] = {};
-uint8_t speakerFrameBuffer[AUDIO_STREAM_SAMPLES * 4] = {};
-uint8_t* latestJpegFrame = nullptr;
-size_t latestJpegFrameLen = 0;
-
-constexpr int8_t IMA_INDEX_TABLE[16] = {
-  -1, -1, -1, -1, 2, 4, 6, 8,
-  -1, -1, -1, -1, 2, 4, 6, 8
+// IMA-ADPCM 테이블
+constexpr int8_t IMA_IDX[16] = {-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
+constexpr int16_t IMA_STP[89] = {
+    7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
+    50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,
+    253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,
+    1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,
+    3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,
+    10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,
+    27086,29794,32767
 };
 
-constexpr int16_t IMA_STEP_TABLE[89] = {
-  7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
-  19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
-  50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
-  130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
-  337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-  876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
-  2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
-  5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
-  15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
-};
+// ============================================================
+//  전역 객체
+// ============================================================
+WebSocketsClient  brokerWs;
+WebServer         httpSrv(80);
+WebSocketsServer  localWs(81);
+I2SClass          mic;
+I2SClass          spk;
+Preferences       nvs;
+Servo             steerServo;
+SemaphoreHandle_t frameLock = nullptr;
+SemaphoreHandle_t wsLock    = nullptr;
+
+// ============================================================
+//  상태 (최소화)
+// ============================================================
+bool apMode      = false;
+bool wsReady     = false;
+bool wsConfigured= false;
+bool camReady    = false, micReady = false, spkReady = false;
+bool httpReady   = false, lwsReady = false;
+
+bool driveMode   = true;
+bool ledOn       = false;
+bool talkOn      = false;
+int  curThr = 0, curStr = 0;
+
+// WiFi 연결
+bool     wifiFlying  = false;
+unsigned long wifiAt = 0, wifiStartAt = 0;
+uint8_t  wifiFails   = 0;
+bool     hasWifi     = false;
+
+// WS 연결
+bool     wsFlying    = false;
+unsigned long wsAt   = 0;
+unsigned long wsConnectedAt = 0;  // 0 = 미연결
+unsigned long wsNextAt      = 0;
+unsigned long wsRetryMs     = WS_RETRY_MIN;
+
+// 브로커 클라이언트 유무
+bool     clientOnline = false;
+uint16_t clientCount  = 0;
+
+// 타임스탬프
+unsigned long vidAt  = 0, audAt  = 0;
+unsigned long pingAt = 0, statAt = 0, cmdAt = 0;
+unsigned long transAt = 0;  // AP→브로커 전환 예약
+
+// WiFi 설정
+String cfgSsid, cfgPass, cfgHost, cfgId;
+uint16_t cfgPort = BROKER_PORT;
+String memSsid[WIFI_MEM_MAX], memPass[WIFI_MEM_MAX];
+uint8_t memCnt = 0;
+
+// JPEG 프레임
+uint8_t* latestJpeg    = nullptr;
+size_t   latestJpegLen = 0;
+
+// 오디오 버퍼 (전역 → 스택 절약)
+int16_t capBuf[CHUNK]       = {};
+uint8_t adpcmBuf[ADPCM_BYTES]= {};
+char    b64Buf[B64_BYTES]    = {};
+uint8_t decBuf[ADPCM_BYTES]  = {};
+int16_t playBuf[CHUNK]       = {};
+uint8_t spkBuf[CHUNK * 4]    = {};
+
+// ADPCM / HPF 상태
+int32_t hpfState = 0, hpfPrev = 0;
+int8_t  adpcmStep = 0;
+uint32_t audSeq   = 0;
+
+// ============================================================
+//  뮤텍스 / WS 송신 헬퍼
+// ============================================================
+bool lockWs(TickType_t t = pdMS_TO_TICKS(100)) {
+  return wsLock && xSemaphoreTakeRecursive(wsLock, t) == pdTRUE;
 }
+void unlockWs() { if (wsLock) xSemaphoreGiveRecursive(wsLock); }
 
-void writeMotorOutput(int throttle);
-void writeSteeringOutput(int steering);
-void setLedState(bool enabled);
-void applyCameraQuality(const char* quality);
-void initActuators();
-bool loadWifiCredentials();
-void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId);
-void loadRememberedWifi();
-void saveRememberedWifi();
-void rememberWifiCredentials(const String& ssid, const String& password);
-String getRememberedPassword(const String& ssid);
-void setConnectOnBoot(bool enabled);
-void startProvisioningAp();
-void enterBrokerMode();
-void startHttpServer();
-uint32_t readBatteryMilliVolts();
-uint8_t estimateBatteryPercent(uint32_t batteryMv);
-void resetBrokerFailureCounters();
-void scheduleBrokerRecovery(const char* reason);
+bool wsSendText(String& p) {
+  if (!wsReady || !lockWs()) return false;
+  bool ok = brokerWs.sendTXT(p);
+  unlockWs();
+  return ok;
+}
+bool wsSendBinary(const uint8_t* d, size_t n) {
+  if (!wsReady || !lockWs()) return false;
+  bool ok = brokerWs.sendBIN(d, n);
+  unlockWs();
+  return ok;
+}
+void wsDisconnect() { if (lockWs()) { brokerWs.disconnect(); unlockWs(); } }
+void wsPoll()       { if (lockWs(pdMS_TO_TICKS(20))) { brokerWs.loop(); unlockWs(); } }
 
-void handleRoot();
-void handleStatusJson();
-void handleControlJson();
-void handleConfigSave();
-void handleJpeg();
-void handleStream();
-void handleWifiScan();
-void handleWifiConnect();
-void handleTalkAudio();
-void playSpeakerBootTone();
-void playSpeakerTransitionTone();
-void drainMicrophoneInput();
-void startCameraCaptureTask();
-void cameraCaptureTask(void* arg);
-void startVideoUploadTask();
-void videoUploadTask(void* arg);
-void uploadVideoFrameIfNeeded();
-bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen);
-size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
-size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
-void playSpeakerSamples(const int16_t* samples, size_t sampleCount);
-bool lockWs(TickType_t timeoutTicks = pdMS_TO_TICKS(100));
-void unlockWs();
-bool wsSendText(String& payload);
-bool wsSendBinary(const uint8_t* payload, size_t length);
-void wsDisconnectSafe();
-void wsLoopSafe();
-
+// ============================================================
+//  모터 / 서보
+// ============================================================
+void motorWrite(int v) {
+  v = map(constrain(v,-100,100),-100,100,-90,90);
+  int pwm = map(v,-90,90,-2000,2000);
+  uint32_t maxD = (1u<<MOTOR_BITS)-1u, duty=0;
+  if      (pwm >  600) { digitalWrite(PIN_MOTOR_A,HIGH); digitalWrite(PIN_MOTOR_B,LOW);  duty=map(pwm,0,2000,0,(int)maxD); }
+  else if (pwm < -600) { digitalWrite(PIN_MOTOR_A,LOW);  digitalWrite(PIN_MOTOR_B,HIGH); duty=map(-pwm,0,2000,0,(int)maxD); }
+  else                 { digitalWrite(PIN_MOTOR_A,LOW);  digitalWrite(PIN_MOTOR_B,LOW); }
+  ledcWriteChannel(MOTOR_CH, duty);
+}
+void servoWrite(int v) {
+  steerServo.write(constrain(map(v,-100,100,180,35),0,180));
+}
 void safeStop() {
-  lastThrottle = 0;
-  lastSteering = 0;
-  writeMotorOutput(0);
-  writeSteeringOutput(0);
-  Serial.println("[SAFE] stop");
+  curThr=0; curStr=0;
+  digitalWrite(PIN_MOTOR_A,LOW); digitalWrite(PIN_MOTOR_B,LOW);
+  ledcWriteChannel(MOTOR_CH,0);
+  steerServo.write(90);
 }
-
-bool lockWs(TickType_t timeoutTicks) {
-  if (wsMutex == nullptr) {
-    return false;
-  }
-  return xSemaphoreTakeRecursive(wsMutex, timeoutTicks) == pdTRUE;
-}
-
-void unlockWs() {
-  if (wsMutex != nullptr) {
-    xSemaphoreGiveRecursive(wsMutex);
-  }
-}
-
-bool wsSendText(String& payload) {
-  if (!lockWs()) {
-    return false;
-  }
-  bool sent = ws.sendTXT(payload);
-  unlockWs();
-  return sent;
-}
-
-bool wsSendBinary(const uint8_t* payload, size_t length) {
-  if (!lockWs()) {
-    return false;
-  }
-  bool sent = ws.sendBIN(payload, length);
-  unlockWs();
-  return sent;
-}
-
-void wsDisconnectSafe() {
-  if (!lockWs()) {
-    return;
-  }
-  ws.disconnect();
-  unlockWs();
-}
-
-void wsLoopSafe() {
-  if (!lockWs(pdMS_TO_TICKS(20))) {
-    return;
-  }
-  ws.loop();
-  unlockWs();
-}
-
-void playSpeakerBootTone() {
-  if (!speakerReady) {
-    return;
-  }
-
-  constexpr int16_t amplitude = 2800;
-  constexpr uint32_t toneHz = 880;
-  constexpr size_t sampleCount = AUDIO_PLAYBACK_SAMPLE_RATE / 12;
-  int16_t sample = amplitude;
-  uint32_t halfWaveSamples = AUDIO_PLAYBACK_SAMPLE_RATE / (toneHz * 2);
-  if (halfWaveSamples == 0) {
-    halfWaveSamples = 1;
-  }
-
-  for (size_t i = 0; i < sampleCount; ++i) {
-    if ((i % halfWaveSamples) == 0) {
-      sample = -sample;
-    }
-    uint8_t frame[4] = {
-      static_cast<uint8_t>(sample & 0xff),
-      static_cast<uint8_t>((sample >> 8) & 0xff),
-      static_cast<uint8_t>(sample & 0xff),
-      static_cast<uint8_t>((sample >> 8) & 0xff)
-    };
-    speaker.write(frame, sizeof(frame));
-  }
-}
-
-bool loadWifiCredentials() {
-  preferences.begin(PREF_NAMESPACE, true);
-  activeWifiSsid = preferences.getString(PREF_WIFI_SSID, "");
-  activeWifiPassword = preferences.getString(PREF_WIFI_PASS, "");
-  activeBrokerHost = preferences.getString(PREF_BROKER_HOST, "");
-  activeBrokerPort = preferences.getUShort(PREF_BROKER_PORT, 0);
-  activeDeviceId = preferences.getString(PREF_DEVICE_ID, "");
-  connectOnBoot = preferences.getBool(PREF_CONNECT_ONCE, false);
-  preferences.end();
-
-  if (activeWifiSsid.length() == 0 && strlen(WIFI_SSID) > 0) {
-    activeWifiSsid = WIFI_SSID;
-    activeWifiPassword = WIFI_PASSWORD;
-  }
-  if (activeBrokerHost.length() == 0 && strlen(BROKER_HOST) > 0) {
-    activeBrokerHost = BROKER_HOST;
-  }
-  if (activeBrokerPort == 0) {
-    activeBrokerPort = static_cast<uint16_t>(BROKER_PORT);
-  }
-  if (activeDeviceId.length() == 0 && strlen(DEVICE_ID) > 0) {
-    activeDeviceId = DEVICE_ID;
-  }
-  if (activeDeviceId.length() == 0) {
-    activeDeviceId = DEFAULT_DEVICE_ID;
-  }
-
-  Serial.printf("[CFG] wifiSsidLen=%u wifiPassLen=%u brokerHost=%s brokerPort=%u deviceId=%s\n",
-    static_cast<unsigned>(activeWifiSsid.length()),
-    static_cast<unsigned>(activeWifiPassword.length()),
-    activeBrokerHost.c_str(),
-    activeBrokerPort,
-    activeDeviceId.c_str());
-
-  hasStoredWifi = activeWifiSsid.length() > 0;
-  return hasStoredWifi;
-}
-
-void loadRememberedWifi() {
-  rememberedWifiCount = 0;
-
-  preferences.begin(PREF_NAMESPACE, true);
-  String memoryJson = preferences.getString(PREF_WIFI_MEMORY, "");
-  preferences.end();
-
-  if (memoryJson.length() == 0) {
-    if (activeWifiSsid.length() > 0) {
-      rememberWifiCredentials(activeWifiSsid, activeWifiPassword);
-    }
-    return;
-  }
-
-  StaticJsonDocument<512> doc;
-  if (deserializeJson(doc, memoryJson)) {
-    return;
-  }
-
-  JsonArray items = doc["items"].as<JsonArray>();
-  for (JsonObject item : items) {
-    if (rememberedWifiCount >= MAX_REMEMBERED_WIFI) {
-      break;
-    }
-    String ssid = String(item["ssid"] | "");
-    if (ssid.length() == 0) {
-      continue;
-    }
-    rememberedSsids[rememberedWifiCount] = ssid;
-    rememberedPasswords[rememberedWifiCount] = String(item["password"] | "");
-    rememberedWifiCount++;
-  }
-
-  if (rememberedWifiCount == 0 && activeWifiSsid.length() > 0) {
-    rememberWifiCredentials(activeWifiSsid, activeWifiPassword);
-  }
-}
-
-void saveRememberedWifi() {
-  StaticJsonDocument<512> doc;
-  JsonArray items = doc.createNestedArray("items");
-  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
-    JsonObject item = items.createNestedObject();
-    item["ssid"] = rememberedSsids[i];
-    item["password"] = rememberedPasswords[i];
-  }
-
-  String payload;
-  serializeJson(doc, payload);
-
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putString(PREF_WIFI_MEMORY, payload);
-  preferences.end();
-}
-
-void rememberWifiCredentials(const String& ssid, const String& password) {
-  if (ssid.length() == 0) {
-    return;
-  }
-
-  int existingIndex = -1;
-  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
-    if (rememberedSsids[i] == ssid) {
-      existingIndex = i;
-      break;
-    }
-  }
-
-  String nextPassword = password;
-
-  if (existingIndex > 0) {
-    for (int i = existingIndex; i > 0; --i) {
-      rememberedSsids[i] = rememberedSsids[i - 1];
-      rememberedPasswords[i] = rememberedPasswords[i - 1];
-    }
-    rememberedSsids[0] = ssid;
-    rememberedPasswords[0] = nextPassword;
-  } else if (existingIndex == 0) {
-    rememberedPasswords[0] = nextPassword;
-  } else {
-    if (rememberedWifiCount < MAX_REMEMBERED_WIFI) {
-      for (int i = rememberedWifiCount; i > 0; --i) {
-        rememberedSsids[i] = rememberedSsids[i - 1];
-        rememberedPasswords[i] = rememberedPasswords[i - 1];
-      }
-      rememberedWifiCount++;
-    } else {
-      for (int i = MAX_REMEMBERED_WIFI - 1; i > 0; --i) {
-        rememberedSsids[i] = rememberedSsids[i - 1];
-        rememberedPasswords[i] = rememberedPasswords[i - 1];
-      }
-    }
-    rememberedSsids[0] = ssid;
-    rememberedPasswords[0] = nextPassword;
-  }
-
-  saveRememberedWifi();
-}
-
-String getRememberedPassword(const String& ssid) {
-  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
-    if (rememberedSsids[i] == ssid) {
-      return rememberedPasswords[i];
-    }
-  }
-  return "";
-}
-
-void setConnectOnBoot(bool enabled) {
-  connectOnBoot = enabled;
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putBool(PREF_CONNECT_ONCE, enabled);
-  preferences.end();
-}
-
-void saveConfig(const String& ssid, const String& password, const String& brokerHost, uint16_t brokerPort, const String& deviceId) {
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putString(PREF_WIFI_SSID, ssid);
-  preferences.putString(PREF_WIFI_PASS, password);
-  preferences.putString(PREF_BROKER_HOST, brokerHost);
-  preferences.putUShort(PREF_BROKER_PORT, brokerPort);
-  preferences.putString(PREF_DEVICE_ID, deviceId);
-  preferences.end();
-  activeWifiSsid = ssid;
-  activeWifiPassword = password;
-  activeBrokerHost = brokerHost;
-  activeBrokerPort = brokerPort;
-  activeDeviceId = deviceId;
-  hasStoredWifi = true;
-  Serial.printf("[CFG] saved wifiSsidLen=%u wifiPassLen=%u brokerHost=%s brokerPort=%u deviceId=%s\n",
-    static_cast<unsigned>(ssid.length()),
-    static_cast<unsigned>(password.length()),
-    brokerHost.c_str(),
-    brokerPort,
-    deviceId.c_str());
-  rememberWifiCredentials(ssid, password);
-}
-
-void startProvisioningAp() {
-  if (apMode) {
-    return;
-  }
-
-  safeStop();
-  wsDisconnectSafe();
-  WiFi.disconnect(true, true);
-  delay(100);
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  apMode = true;
-  wifiConnectInFlight = false;
-  wsConnectInFlight = false;
-  wsConnected = false;
-  brokerClientPresent = false;
-  brokerClientCount = 0;
-  drainMicrophoneInput();
-  Serial.printf("[AP] started ssid=%s ip=%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
-}
-
-void enterBrokerMode() {
-  if (!apMode) {
-    return;
-  }
-
-  Serial.println("[CFG] switching to broker mode");
-  playSpeakerTransitionTone();
-  brokerModeTransitionAt = 0;
-  setConnectOnBoot(false);
-  safeStop();
-  resetBrokerFailureCounters();
-  wsConnected = false;
-  wsConnectInFlight = false;
-  wifiConnectInFlight = false;
-  brokerClientPresent = false;
-  brokerClientCount = 0;
-  wsConnectedAt = 0;
-  nextReconnectAt = 0;
-  lastWifiAttemptAt = 0;
-  lastAudioUploadAt = 0;
-  wsDisconnectSafe();
-  drainMicrophoneInput();
-  WiFi.softAPdisconnect(true);
-  delay(100);
-  WiFi.mode(WIFI_STA);
-  apMode = false;
-}
-
-uint32_t readBatteryMilliVolts() {
-  return analogReadMilliVolts(BATTERY_SENSE_PIN) * 2U;
-}
-
-uint8_t estimateBatteryPercent(uint32_t batteryMv) {
-  // Simple 2S Li-ion estimate for the dashboard: 6.4V empty, 8.4V full.
-  long percent = map(static_cast<long>(constrain(batteryMv, 6400UL, 8400UL)), 6400L, 8400L, 0L, 100L);
-  return static_cast<uint8_t>(constrain(percent, 0L, 100L));
-}
-
-void publishStatus() {
-  if (!wsConnected) {
-    return;
-  }
-
-  StaticJsonDocument<160> doc;
-  doc["type"] = "status";
-  doc["rssi"] = WiFi.RSSI();
-  doc["uptime"] = millis();
-  doc["throttle"] = lastThrottle;
-  doc["steering"] = lastSteering;
-  doc["cameraReady"] = cameraReady;
-  doc["audioReady"] = microphoneReady;
-  doc["audioCodec"] = "adpcm_ima";
-  doc["audioSampleRate"] = AUDIO_STREAM_SAMPLE_RATE;
-  doc["mode"] = driveMode ? "drive" : "monitor";
-  doc["ledEnabled"] = ledEnabled;
-  doc["talkEnabled"] = talkEnabled;
-  doc["batteryMv"] = readBatteryMilliVolts();
-  doc["batteryPct"] = estimateBatteryPercent(doc["batteryMv"]);
-  doc["apMode"] = apMode;
-  doc["streamPort"] = 80;
-  doc["streamPath"] = "/stream";
-  doc["localIp"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
-
-  String payload;
-  serializeJson(doc, payload);
-  wsSendText(payload);
-}
-
-void applyControl(int throttle, int steering) {
-  if (!driveMode) {
-    safeStop();
-    Serial.println("[CTRL] ignored in monitor mode");
-    return;
-  }
-
-  lastThrottle = constrain(throttle, -100, 100);
-  lastSteering = constrain(steering, -100, 100);
-  lastCommandAt = millis();
-  writeMotorOutput(lastThrottle);
-  writeSteeringOutput(lastSteering);
-
-  Serial.printf("[CTRL] throttle=%d steering=%d\n", lastThrottle, lastSteering);
-}
-
 void initActuators() {
-  pinMode(MOTOR_DIR1_PIN, OUTPUT);
-  pinMode(MOTOR_DIR2_PIN, OUTPUT);
-  digitalWrite(MOTOR_DIR1_PIN, LOW);
-  digitalWrite(MOTOR_DIR2_PIN, LOW);
-
-  ledcAttachChannel(MOTOR_PWM_PIN, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_RES_BITS, MOTOR_PWM_CHANNEL);
-  ledcWriteChannel(MOTOR_PWM_CHANNEL, 0);
-
-  steeringServo.setPeriodHertz(SERVO_PWM_FREQ_HZ);
-  steeringServo.attach(SERVO_PWM_PIN, 500, 2500);
-
-  if (STATUS_LED_PIN >= 0) {
-    pinMode(STATUS_LED_PIN, OUTPUT);
-    digitalWrite(STATUS_LED_PIN, LOW);
-  }
-
+  pinMode(PIN_MOTOR_A,OUTPUT); pinMode(PIN_MOTOR_B,OUTPUT);
+  digitalWrite(PIN_MOTOR_A,LOW); digitalWrite(PIN_MOTOR_B,LOW);
+  ledcAttachChannel(PIN_MOTOR_PWM, MOTOR_FREQ, MOTOR_BITS, MOTOR_CH);
+  ledcWriteChannel(MOTOR_CH,0);
+  steerServo.setPeriodHertz(50);
+  steerServo.attach(PIN_SERVO,500,2500);
+  if (PIN_LED>=0){ pinMode(PIN_LED,OUTPUT); digitalWrite(PIN_LED,LOW); }
   analogReadResolution(12);
 }
 
-void writeMotorOutput(int throttle) {
-  // Preserve the older car tuning: UI sends -100..100, legacy drive code used -90..90.
-  int legacyThrottle = map(throttle, -100, 100, -90, 90);
-  int pwmValue = map(legacyThrottle, -90, 90, -2000, 2000);
-  uint32_t maxDuty = (1U << MOTOR_PWM_RES_BITS) - 1U;
-  uint32_t duty = 0;
-
-  if (pwmValue > 600) {
-    digitalWrite(MOTOR_DIR1_PIN, HIGH);
-    digitalWrite(MOTOR_DIR2_PIN, LOW);
-    duty = map(pwmValue, 0, 2000, 0, static_cast<int>(maxDuty));
-  } else if (pwmValue < -600) {
-    digitalWrite(MOTOR_DIR1_PIN, LOW);
-    digitalWrite(MOTOR_DIR2_PIN, HIGH);
-    duty = map(abs(pwmValue), 0, 2000, 0, static_cast<int>(maxDuty));
-  } else {
-    digitalWrite(MOTOR_DIR1_PIN, LOW);
-    digitalWrite(MOTOR_DIR2_PIN, LOW);
-  }
-
-  ledcWriteChannel(MOTOR_PWM_CHANNEL, duty);
-}
-
-void writeSteeringOutput(int steering) {
-  int servoAngle = map(steering, -100, 100, 180, 35);
-  servoAngle = constrain(servoAngle, 0, 180);
-  steeringServo.write(servoAngle);
-}
-
-void setLedState(bool enabled) {
-  ledEnabled = enabled;
-  if (STATUS_LED_PIN >= 0) {
-    digitalWrite(STATUS_LED_PIN, enabled ? HIGH : LOW);
-  }
-  Serial.printf("[LED] %s\n", enabled ? "on" : "off");
-}
-
-void applyCameraQuality(const char* quality) {
-  sensor_t* sensor = esp_camera_sensor_get();
-  if (sensor == nullptr) {
-    return;
-  }
-
-  framesize_t frameSize = FRAMESIZE_QVGA;
-  int jpegQuality = 14;
-
-  if (strcmp(quality, "VGA") == 0) {
-    frameSize = FRAMESIZE_VGA;
-    jpegQuality = 12;
-  } else if (strcmp(quality, "SVGA") == 0) {
-    frameSize = FRAMESIZE_SVGA;
-    jpegQuality = 12;
-  } else if (strcmp(quality, "UXGA") == 0) {
-    frameSize = FRAMESIZE_UXGA;
-    jpegQuality = 10;
-  }
-
-  sensor->set_framesize(sensor, frameSize);
-  sensor->set_quality(sensor, jpegQuality);
-  Serial.printf("[CAM] quality=%s\n", quality);
-}
-
-void scheduleReconnect() {
-  wsConnected = false;
-  wsConnectInFlight = false;
-  wsConnectedAt = 0;
-  nextReconnectAt = millis() + reconnectDelayMs;
-  reconnectDelayMs = min(reconnectDelayMs * 2UL, 30000UL);
-}
-
-void scheduleRestart(const char* reason) {
-  if (restartScheduledAt != 0) {
-    return;
-  }
-
-  safeStop();
-  restartScheduledAt = millis() + RESTART_DELAY_MS;
-  Serial.printf("[SYS] restart scheduled: %s\n", reason);
-}
-
-void resetBrokerFailureCounters() {
-  pingFailCount = 0;
-  brokerDisconnectCount = 0;
-  brokerWsErrorCount = 0;
-  brokerVideoFailCount = 0;
-  brokerAudioFailCount = 0;
-  brokerDisconnectLatched = false;
-}
-
-void scheduleBrokerRecovery(const char* reason) {
-  if (restartScheduledAt != 0 || apMode) {
-    return;
-  }
-
-  Serial.printf("[SYS] broker recovery: %s\n", reason);
-  safeStop();
-  resetBrokerFailureCounters();
-  setConnectOnBoot(false);
-  wsConnected = false;
-  wsConnectInFlight = false;
-  wifiConnectInFlight = false;
-  brokerClientPresent = false;
-  brokerClientCount = 0;
-  nextReconnectAt = 0;
-  wsDisconnectSafe();
-  brokerAudioMutedUntil = millis() + BROKER_AUDIO_FAIL_COOLDOWN_MS;
-  WiFi.disconnect(true, true);
-  startProvisioningAp();
-}
-
-void configureWebSocket() {
-  if (wsConfigured) {
-    return;
-  }
-
-  ws.onEvent([](WStype_t type, uint8_t* payload, size_t length) {
-    switch (type) {
-      case WStype_CONNECTED:
-        wsConnected = true;
-        wsConnectInFlight = false;
-        wsConnectedAt = millis();
-        brokerClientPresent = false;
-        brokerClientCount = 0;
-        drainMicrophoneInput();
-        resetBrokerFailureCounters();
-        reconnectDelayMs = 1000;
-        Serial.println("[WS] connected");
-        break;
-      case WStype_DISCONNECTED:
-        wsConnected = false;
-        wsConnectInFlight = false;
-        wsConnectedAt = 0;
-        brokerClientPresent = false;
-        brokerClientCount = 0;
-        Serial.println("[WS] disconnected");
-        safeStop();
-        if (!brokerDisconnectLatched) {
-          brokerDisconnectLatched = true;
-          brokerDisconnectCount++;
-        }
-        scheduleReconnect();
-        break;
-      case WStype_TEXT: {
-        StaticJsonDocument<256> doc;
-        DeserializationError error = deserializeJson(doc, payload, length);
-        if (error) {
-          Serial.println("[WS] invalid json");
-          return;
-        }
-
-        const char* messageType = doc["type"] | "";
-        if (strcmp(messageType, "ctrl") == 0) {
-          applyControl(doc["throttle"] | 0, doc["steering"] | 0);
-        } else if (strcmp(messageType, "led") == 0) {
-          setLedState(doc["enabled"] | false);
-        } else if (strcmp(messageType, "mode") == 0) {
-          driveMode = strcmp(doc["mode"] | "drive", "monitor") != 0;
-          if (!driveMode) {
-            safeStop();
-          }
-          Serial.printf("[MODE] %s\n", driveMode ? "drive" : "monitor");
-        } else if (strcmp(messageType, "talk") == 0) {
-          talkEnabled = doc["enabled"] | false;
-          Serial.printf("[TALK] %s\n", talkEnabled ? "on" : "off");
-        } else if (strcmp(messageType, "talk_audio") == 0) {
-          if (!speakerReady) {
-            return;
-          }
-          const char* payloadBase64 = doc["payload"] | "";
-          Serial.printf("[SPK] talk_audio seq=%lu samples=%u b64=%u\n",
-            static_cast<unsigned long>(doc["seq"] | 0),
-            static_cast<unsigned>(doc["samples"] | 0),
-            static_cast<unsigned>(strlen(payloadBase64)));
-          size_t decodedLen = decodeBase64Payload(payloadBase64, audioDecodeBuffer, sizeof(audioDecodeBuffer));
-          if (decodedLen == 0) {
-            Serial.println("[SPK] base64 decode failed");
-            return;
-          }
-          size_t sampleCount = static_cast<size_t>(doc["samples"] | static_cast<int>(AUDIO_STREAM_SAMPLES));
-          sampleCount = min(sampleCount, static_cast<size_t>(AUDIO_STREAM_SAMPLES));
-          size_t pcmSamples = decodeAdpcmBlock(audioDecodeBuffer, decodedLen, audioPlaybackBuffer, sampleCount);
-          if (pcmSamples == 0) {
-            Serial.println("[SPK] adpcm decode failed");
-            return;
-          }
-          playSpeakerSamples(audioPlaybackBuffer, pcmSamples);
-          talkAudioSequence++;
-        } else if (strcmp(messageType, "camera_quality") == 0) {
-          applyCameraQuality(doc["quality"] | "QVGA");
-        } else if (strcmp(messageType, "snapshot") == 0) {
-          Serial.println("[SNAP] requested");
-        } else if (strcmp(messageType, "pong") == 0) {
-          pingFailCount = 0;
-          brokerWsErrorCount = 0;
-        } else if (strcmp(messageType, "hello") == 0) {
-          Serial.println("[WS] broker hello");
-        } else if (strcmp(messageType, "client_state") == 0) {
-          brokerClientCount = static_cast<uint16_t>(doc["clients"] | 0);
-          brokerClientPresent = brokerClientCount > 0;
-          if (brokerClientPresent) {
-            wsConnectedAt = millis();
-            brokerAudioMutedUntil = 0;
-            Serial.printf("[WS] clients online=%u, broker audio enabled\n", brokerClientCount);
-          } else {
-            drainMicrophoneInput();
-            Serial.println("[WS] no clients, broker audio paused");
-          }
-        }
-        break;
-      }
-      case WStype_ERROR:
-        Serial.println("[WS] error");
-        brokerWsErrorCount++;
-        if (brokerWsErrorCount >= BROKER_RECOVERY_WS_ERRORS) {
-          scheduleBrokerRecovery("ws_error_repeated");
-        }
-        break;
-      default:
-        break;
-    }
-  });
-  ws.setReconnectInterval(0);
-  wsConfigured = true;
-}
-
+// ============================================================
+//  카메라 초기화
+// ============================================================
 bool initCamera() {
-  camera_config_t config = {};
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = CAM_PIN_D0;
-  config.pin_d1 = CAM_PIN_D1;
-  config.pin_d2 = CAM_PIN_D2;
-  config.pin_d3 = CAM_PIN_D3;
-  config.pin_d4 = CAM_PIN_D4;
-  config.pin_d5 = CAM_PIN_D5;
-  config.pin_d6 = CAM_PIN_D6;
-  config.pin_d7 = CAM_PIN_D7;
-  config.pin_xclk = CAM_PIN_XCLK;
-  config.pin_pclk = CAM_PIN_PCLK;
-  config.pin_vsync = CAM_PIN_VSYNC;
-  config.pin_href = CAM_PIN_HREF;
-  config.pin_sccb_sda = CAM_PIN_SIOD;
-  config.pin_sccb_scl = CAM_PIN_SIOC;
-  config.pin_pwdn = CAM_PIN_PWDN;
-  config.pin_reset = CAM_PIN_RESET;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 14;
-  config.fb_count = 2;
-  config.grab_mode = CAMERA_GRAB_LATEST;
-  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
-
-  Serial.printf("[CAM] psram=%s\n", psramFound() ? "yes" : "no");
-
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    // Fallback path for board/profile mismatches: force low-memory camera mode.
-    config.frame_size = FRAMESIZE_QQVGA;
-    config.jpeg_quality = 20;
-    config.fb_count = 1;
-    config.fb_location = CAMERA_FB_IN_DRAM;
-    err = esp_camera_init(&config);
+  camera_config_t c={};
+  c.ledc_channel=LEDC_CHANNEL_0; c.ledc_timer=LEDC_TIMER_0;
+  c.pin_d0=PIN_CAM_D0; c.pin_d1=PIN_CAM_D1; c.pin_d2=PIN_CAM_D2; c.pin_d3=PIN_CAM_D3;
+  c.pin_d4=PIN_CAM_D4; c.pin_d5=PIN_CAM_D5; c.pin_d6=PIN_CAM_D6; c.pin_d7=PIN_CAM_D7;
+  c.pin_xclk=PIN_CAM_XCLK; c.pin_pclk=PIN_CAM_PCLK;
+  c.pin_vsync=PIN_CAM_VSYNC; c.pin_href=PIN_CAM_HREF;
+  c.pin_sccb_sda=PIN_CAM_SIOD; c.pin_sccb_scl=PIN_CAM_SIOC;
+  c.pin_pwdn=PIN_CAM_PWDN; c.pin_reset=PIN_CAM_RESET;
+  c.xclk_freq_hz=20000000; c.pixel_format=PIXFORMAT_JPEG;
+  c.frame_size=FRAMESIZE_QVGA; c.jpeg_quality=14; c.fb_count=2;
+  c.grab_mode=CAMERA_GRAB_LATEST;
+  c.fb_location=psramFound()?CAMERA_FB_IN_PSRAM:CAMERA_FB_IN_DRAM;
+  Serial.printf("[CAM] psram=%s\n",psramFound()?"yes":"no");
+  if (esp_camera_init(&c)!=ESP_OK) {
+    c.frame_size=FRAMESIZE_QQVGA; c.jpeg_quality=20;
+    c.fb_count=1; c.fb_location=CAMERA_FB_IN_DRAM;
+    if (esp_camera_init(&c)!=ESP_OK) { Serial.println("[CAM] FAIL"); return false; }
   }
-  if (err != ESP_OK) {
-    Serial.printf("[CAM] init failed: 0x%x\n", err);
-    return false;
-  }
-
-  sensor_t* sensor = esp_camera_sensor_get();
-  if (sensor != nullptr) {
-    sensor->set_framesize(sensor, FRAMESIZE_QVGA);
-    sensor->set_quality(sensor, 14);
-    sensor->set_brightness(sensor, 0);
-    sensor->set_saturation(sensor, 0);
-    sensor->set_hmirror(sensor, 0);
-    sensor->set_vflip(sensor, 1);
-  }
-
-  Serial.println("[CAM] ready");
-  return true;
+  sensor_t* s=esp_camera_sensor_get();
+  if (s){ s->set_framesize(s,FRAMESIZE_QVGA); s->set_quality(s,14);
+          s->set_brightness(s,0); s->set_saturation(s,0);
+          s->set_hmirror(s,0); s->set_vflip(s,1); }
+  Serial.println("[CAM] OK"); return true;
+}
+void setCamQuality(const char* q) {
+  sensor_t* s=esp_camera_sensor_get(); if(!s) return;
+  if      (!strcmp(q,"VGA"))  { s->set_framesize(s,FRAMESIZE_VGA);  s->set_quality(s,12); }
+  else if (!strcmp(q,"SVGA")) { s->set_framesize(s,FRAMESIZE_SVGA); s->set_quality(s,12); }
+  else if (!strcmp(q,"UXGA")) { s->set_framesize(s,FRAMESIZE_UXGA); s->set_quality(s,10); }
+  else                        { s->set_framesize(s,FRAMESIZE_QVGA); s->set_quality(s,14); }
+  Serial.printf("[CAM] quality=%s\n",q);
 }
 
-bool initMicrophone() {
-  microphone.setPinsPdmRx(MIC_PIN_CLK, MIC_PIN_DATA);
-  bool ok = microphone.begin(I2S_MODE_PDM_RX, AUDIO_CAPTURE_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
-  if (!ok) {
-    Serial.printf("[MIC] init failed: %d\n", microphone.lastError());
-    return false;
-  }
-
-  Serial.println("[MIC] ready");
-  return true;
-}
-
-bool initSpeaker() {
-  speaker.setPins(AMP_BCLK_PIN, AMP_WS_PIN, AMP_DIN_PIN);
-  bool ok = speaker.begin(I2S_MODE_STD, AUDIO_PLAYBACK_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
-  if (!ok) {
-    Serial.printf("[SPK] init failed: %d\n", speaker.lastError());
-    return false;
-  }
-
-  Serial.printf("[SPK] ready bclk=%d ws=%d din=%d\n", AMP_BCLK_PIN, AMP_WS_PIN, AMP_DIN_PIN);
-  return true;
-}
-
-void startHttpServer() {
-  if (serverStarted) {
-    return;
-  }
-  cameraServer.on("/", HTTP_GET, handleRoot);
-  cameraServer.on("/api/status", HTTP_GET, handleStatusJson);
-  cameraServer.on("/api/control", HTTP_POST, handleControlJson);
-  cameraServer.on("/api/config", HTTP_POST, handleConfigSave);
-  cameraServer.on("/api/wifi-scan", HTTP_GET, handleWifiScan);
-  cameraServer.on("/api/wifi-connect", HTTP_POST, handleWifiConnect);
-  cameraServer.on("/api/talk-audio", HTTP_POST, handleTalkAudio);
-  cameraServer.on("/jpg", HTTP_GET, handleJpeg);
-  cameraServer.on("/stream", HTTP_GET, handleStream);
-  cameraServer.onNotFound([]() {
-    Serial.printf("[HTTP] 404 %s\n", cameraServer.uri().c_str());
-    cameraServer.send(404, "text/plain", "not found");
-  });
-  cameraServer.begin();
-  serverStarted = true;
-  cameraServerStarted = true;
-  if (!apMode && !localAudioWsStarted) {
-    localAudioWs.begin();
-    localAudioWs.onEvent([](uint8_t clientNum, WStype_t type, uint8_t* payload, size_t length) {
-      switch (type) {
-        case WStype_CONNECTED: {
-          IPAddress ip = localAudioWs.remoteIP(clientNum);
-          Serial.printf("[WS-LOCAL] client %u connected from %u.%u.%u.%u\n", clientNum, ip[0], ip[1], ip[2], ip[3]);
-          break;
-        }
-        case WStype_DISCONNECTED:
-          Serial.printf("[WS-LOCAL] client %u disconnected\n", clientNum);
-          break;
-        case WStype_TEXT:
-          if (length == 4 && memcmp(payload, "ping", 4) == 0) {
-            localAudioWs.sendTXT(clientNum, "pong");
-          }
-          break;
-        default:
-          break;
-      }
-    });
-    localAudioWsStarted = true;
-    Serial.println("[WS-LOCAL] listening on :81");
-  }
-  Serial.println("[HTTP] server started on :80");
-}
-
-void handleRoot() {
-  // web/index.html 내용을 직접 전송 (PROGMEM 대신 LittleFS 미사용 환경 대응)
-  // AP/STA 모드 공통 UI: web/index.html의 isApOrLocal 분기로 자동 처리됨
-  Serial.printf("[HTTP] GET / from %s\n", cameraServer.client().remoteIP().toString().c_str());
-  cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  cameraServer.send_P(200, "text/html; charset=utf-8", WEB_INDEX_HTML);
-}
-
-
-void handleStatusJson() {
-  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
-  StaticJsonDocument<192> doc;
-  doc["apMode"] = apMode;
-  doc["ip"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
-  doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : 0;
-  doc["batteryMv"] = readBatteryMilliVolts();
-  doc["batteryPct"] = estimateBatteryPercent(doc["batteryMv"]);
-  doc["mode"] = driveMode ? "drive" : "monitor";
-  doc["ledEnabled"] = ledEnabled;
-  doc["throttle"] = lastThrottle;
-  doc["steering"] = lastSteering;
-  doc["wsConnected"] = wsConnected;
-  String payload;
-  serializeJson(doc, payload);
-  cameraServer.send(200, "application/json", payload);
-}
-
-void handleControlJson() {
-  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
-  if (apMode) {
-    cameraServer.send(403, "application/json", "{\"ok\":false,\"reason\":\"ap_setup_only\"}");
-    return;
-  }
-  StaticJsonDocument<512> doc;
-  DeserializationError error = deserializeJson(doc, cameraServer.arg("plain"));
-  if (error) {
-    cameraServer.send(400, "application/json", "{\"ok\":false}");
-    return;
-  }
-
-  if (doc.containsKey("ledEnabled")) {
-    setLedState(doc["ledEnabled"] | false);
-  }
-  if (doc.containsKey("throttle") || doc.containsKey("steering")) {
-    applyControl(doc["throttle"] | lastThrottle, doc["steering"] | lastSteering);
-  }
-  if (doc.containsKey("talk")) {
-    talkEnabled = doc["talk"] | false;
-    Serial.printf("[TALK] %s (AP mode)\n", talkEnabled ? "on" : "off");
-  }
-  if (doc.containsKey("quality")) {
-    applyCameraQuality(doc["quality"] | "QVGA");
-  }
-  cameraServer.send(200, "application/json", "{\"ok\":true}");
-}
-
-void handleConfigSave() {
-  String ssid = cameraServer.arg("ssid");
-  String password = cameraServer.arg("password");
-  String brokerHost = cameraServer.arg("brokerHost");
-  String brokerPortText = cameraServer.arg("brokerPort");
-  String deviceId = cameraServer.arg("deviceId");
-  ssid.trim();
-  password.trim();
-  brokerHost.trim();
-  brokerPortText.trim();
-  deviceId.trim();
-
-  if (ssid.length() == 0) {
-    ssid = activeWifiSsid;
-  }
-  const bool ssidChanged = ssid != activeWifiSsid;
-  if (password.length() == 0) {
-    if (ssidChanged) {
-      String rememberedPassword = getRememberedPassword(ssid);
-      if (rememberedPassword.length() > 0) {
-        password = rememberedPassword;
-      }
-    }
-  }
-  if (brokerHost.length() == 0) {
-    brokerHost = activeBrokerHost;
-  }
-  if (deviceId.length() == 0) {
-    deviceId = activeDeviceId;
-  }
-
-  uint16_t brokerPort = activeBrokerPort;
-  if (brokerPortText.length() > 0) {
-    long parsedPort = brokerPortText.toInt();
-    if (parsedPort >= 1 && parsedPort <= 65535) {
-      brokerPort = static_cast<uint16_t>(parsedPort);
-    }
-  }
-
-  if (ssid.length() == 0 || brokerHost.length() == 0 || deviceId.length() == 0 || brokerPort == 0) {
-    cameraServer.send(400, "text/plain", "invalid config");
-    return;
-  }
-
-  saveConfig(ssid, password, brokerHost, brokerPort, deviceId);
-  setConnectOnBoot(false);
-  cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Switching to broker mode...</p></body></html>");
-  Serial.println("[CFG] broker transition scheduled");
-  brokerModeTransitionAt = millis() + AP_TO_BROKER_TRANSITION_MS;
-}
-
-void startCameraCaptureTask() {
-  if (!cameraReady || cameraCaptureTaskStarted) {
-    return;
-  }
-  if (latestFrameMutex == nullptr) {
-    latestFrameMutex = xSemaphoreCreateMutex();
-    if (latestFrameMutex == nullptr) {
-      Serial.println("[CAM] frame mutex init failed");
-      return;
-    }
-  }
-  BaseType_t rc = xTaskCreatePinnedToCore(
-    cameraCaptureTask, "camera_capture", 6144, nullptr, 1, &cameraCaptureTaskHandle, 0
-  );
-  if (rc != pdPASS) {
-    Serial.println("[CAM] capture task start failed");
-    return;
-  }
-  cameraCaptureTaskStarted = true;
-  Serial.println("[CAM] capture task started");
-}
-
-void cameraCaptureTask(void* arg) {
-  (void)arg;
-  for (;;) {
-    if (!cameraReady) {
-      vTaskDelay(pdMS_TO_TICKS(250));
-      continue;
-    }
-
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (fb == nullptr) {
-      Serial.println("[CAM] capture task frame unavailable");
-      vTaskDelay(pdMS_TO_TICKS(50));
-      continue;
-    }
-
-    auto nextFrame = std::make_unique<uint8_t[]>(fb->len);
-    if (nextFrame) {
-      memcpy(nextFrame.get(), fb->buf, fb->len);
-      if (latestFrameMutex != nullptr && xSemaphoreTake(latestFrameMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        delete[] latestJpegFrame;
-        latestJpegFrame = nextFrame.release();
-        latestJpegFrameLen = fb->len;
-        latestFrameSequence++;
-        xSemaphoreGive(latestFrameMutex);
-      }
+// 카메라 캡처 태스크 (Core 0)
+void taskCamCapture(void*) {
+  for(;;) {
+    if (!camReady) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
+    camera_fb_t* fb=esp_camera_fb_get();
+    if (!fb)       { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+    auto buf=std::make_unique<uint8_t[]>(fb->len);
+    if (buf && frameLock && xSemaphoreTake(frameLock,pdMS_TO_TICKS(20))==pdTRUE) {
+      memcpy(buf.get(),fb->buf,fb->len);
+      delete[] latestJpeg;
+      latestJpeg=buf.release(); latestJpegLen=fb->len;
+      xSemaphoreGive(frameLock);
     }
     esp_camera_fb_return(fb);
-    vTaskDelay(pdMS_TO_TICKS(CAMERA_CAPTURE_INTERVAL_MS));
+    vTaskDelay(pdMS_TO_TICKS(80));
   }
 }
 
-bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen) {
-  frameLen = 0;
-  if (latestFrameMutex == nullptr) {
-    return false;
-  }
-  if (xSemaphoreTake(latestFrameMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
-    return false;
-  }
-  if (latestJpegFrame == nullptr || latestJpegFrameLen == 0) {
-    xSemaphoreGive(latestFrameMutex);
-    return false;
-  }
-
-  frameLen = latestJpegFrameLen;
-  frameCopy = std::make_unique<uint8_t[]>(frameLen);
-  if (frameCopy) {
-    memcpy(frameCopy.get(), latestJpegFrame, frameLen);
-  } else {
-    frameLen = 0;
-  }
-  xSemaphoreGive(latestFrameMutex);
-  return frameLen > 0;
+bool copyFrame(std::unique_ptr<uint8_t[]>& out, size_t& len) {
+  len=0;
+  if (!frameLock||xSemaphoreTake(frameLock,pdMS_TO_TICKS(20))!=pdTRUE) return false;
+  if (!latestJpeg||!latestJpegLen) { xSemaphoreGive(frameLock); return false; }
+  len=latestJpegLen;
+  out=std::make_unique<uint8_t[]>(len);
+  if (out) memcpy(out.get(),latestJpeg,len); else len=0;
+  xSemaphoreGive(frameLock);
+  return len>0;
 }
 
-void startVideoUploadTask() {
-  if (!cameraReady || videoUploadTaskStarted) {
-    return;
-  }
-
-  if (wsMutex == nullptr) {
-    wsMutex = xSemaphoreCreateRecursiveMutex();
-    if (wsMutex == nullptr) {
-      Serial.println("[WS] failed to create mutex");
-      return;
+// 비디오 업로드 태스크 (Core 1)
+void taskVidUpload(void*) {
+  for(;;) {
+    // 조건 미충족 → 슬립
+    if (!camReady||!wsReady||apMode||WiFi.status()!=WL_CONNECTED) {
+      vTaskDelay(pdMS_TO_TICKS(20)); continue;
     }
-  }
+    unsigned long now=millis();
+    if (now-vidAt<VIDEO_MS)                                { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+    if (wsConnectedAt==0||(now-wsConnectedAt)<VIDEO_GRACE_MS){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-  BaseType_t rc = xTaskCreatePinnedToCore(
-    videoUploadTask, "video_upload", 6144, nullptr, 1, &videoUploadTaskHandle, 1
-  );
-  if (rc != pdPASS) {
-    Serial.println("[CAM] video upload task start failed");
-    return;
-  }
-
-  videoUploadTaskStarted = true;
-  Serial.println("[CAM] video upload task started");
-}
-
-void videoUploadTask(void* arg) {
-  (void)arg;
-
-  for (;;) {
-    if (restartScheduledAt != 0 || !cameraReady || !wsConnected || apMode || WiFi.status() != WL_CONNECTED) {
-      vTaskDelay(pdMS_TO_TICKS(20));
-      continue;
-    }
-
-    uploadVideoFrameIfNeeded();
+    std::unique_ptr<uint8_t[]> f; size_t n=0;
+    if (copyFrame(f,n) && wsSendBinary(f.get(),n)) vidAt=now;
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
-void playSpeakerTransitionTone() {
-  if (!speakerReady) {
-    return;
-  }
-
-  constexpr int16_t amplitude = 2600;
-  constexpr uint32_t toneHz[] = { 880, 1320 };
-  constexpr size_t toneCount = sizeof(toneHz) / sizeof(toneHz[0]);
-  constexpr size_t sampleCount = AUDIO_PLAYBACK_SAMPLE_RATE / 20;
-  constexpr size_t gapSamples = AUDIO_PLAYBACK_SAMPLE_RATE / 80;
-
-  for (size_t toneIndex = 0; toneIndex < toneCount; ++toneIndex) {
-    int16_t sample = amplitude;
-    uint32_t halfWaveSamples = AUDIO_PLAYBACK_SAMPLE_RATE / (toneHz[toneIndex] * 2);
-    if (halfWaveSamples == 0) {
-      halfWaveSamples = 1;
-    }
-
-    for (size_t i = 0; i < sampleCount; ++i) {
-      if ((i % halfWaveSamples) == 0) {
-        sample = -sample;
-      }
-      uint8_t frame[4] = {
-        static_cast<uint8_t>(sample & 0xff),
-        static_cast<uint8_t>((sample >> 8) & 0xff),
-        static_cast<uint8_t>(sample & 0xff),
-        static_cast<uint8_t>((sample >> 8) & 0xff)
-      };
-      speaker.write(frame, sizeof(frame));
-    }
-
-    for (size_t i = 0; i < gapSamples; ++i) {
-      uint8_t silentFrame[4] = { 0, 0, 0, 0 };
-      speaker.write(silentFrame, sizeof(silentFrame));
-    }
-  }
+// ============================================================
+//  마이크 / 스피커
+// ============================================================
+bool initMic() {
+  mic.setPinsPdmRx(PIN_MIC_CLK,PIN_MIC_DATA);
+  bool ok=mic.begin(I2S_MODE_PDM_RX,SRATE,I2S_DATA_BIT_WIDTH_16BIT,I2S_SLOT_MODE_MONO);
+  if (!ok){ Serial.printf("[MIC] FAIL %d\n",mic.lastError()); return false; }
+  Serial.println("[MIC] OK"); return true;
+}
+bool initSpk() {
+  spk.setPins(PIN_AMP_BCLK,PIN_AMP_WS,PIN_AMP_DIN);
+  bool ok=spk.begin(I2S_MODE_STD,SRATE,I2S_DATA_BIT_WIDTH_16BIT,I2S_SLOT_MODE_STEREO);
+  if (!ok){ Serial.printf("[SPK] FAIL %d\n",spk.lastError()); return false; }
+  Serial.println("[SPK] OK"); return true;
 }
 
-void handleJpeg() {
-  if (apMode) {
-    cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    cameraServer.send(410, "text/plain", "ap setup mode; video disabled");
-    return;
-  }
-  std::unique_ptr<uint8_t[]> frameCopy;
-  size_t frameLen = 0;
-  if (!copyLatestJpegFrame(frameCopy, frameLen)) {
-    Serial.println("[CAM] /jpg cached frame unavailable");
-    cameraServer.send(503, "text/plain", "camera frame unavailable");
-    return;
-  }
-
-  Serial.printf("[CAM] /jpg %u bytes\n", static_cast<unsigned>(frameLen));
-  WiFiClient client = cameraServer.client();
-  client.print("HTTP/1.1 200 OK\r\n");
-  client.print("Content-Type: image/jpeg\r\n");
-  client.print("Cache-Control: no-cache, no-store, must-revalidate\r\n");
-  client.printf("Content-Length: %u\r\n", static_cast<unsigned>(frameLen));
-  client.print("Connection: close\r\n\r\n");
-  client.write(frameCopy.get(), frameLen);
+// AP모드 대기 중 쌓인 마이크 버퍼 제거
+void drainMic() {
+  if (!micReady) return;
+  int n=0;
+  while (n<DRAIN_LIMIT && mic.available()>=(int)CHUNK_BYTES)
+    { mic.readBytes((char*)capBuf,CHUNK_BYTES); n++; }
+  if (n) Serial.printf("[MIC] drained=%d\n",n);
 }
 
-void handleStream() {
-  cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  cameraServer.send(410, "text/plain", "stream disabled; use /jpg");
-}
-void handleTalkAudio() {
-  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
-  if (apMode) {
-    cameraServer.send(403, "application/json", "{\"ok\":false,\"reason\":\"ap_setup_only\"}");
-    return;
-  }
-  if (!speakerReady) {
-    cameraServer.send(503, "application/json", "{\"ok\":false,\"reason\":\"speaker_not_ready\"}");
-    return;
-  }
-
-  StaticJsonDocument<512> doc;
-  DeserializationError err = deserializeJson(doc, cameraServer.arg("plain"));
-  if (err) {
-    cameraServer.send(400, "application/json", "{\"ok\":false}");
-    return;
-  }
-
-  const char* payloadBase64 = doc["payload"] | "";
-  size_t decodedLen = decodeBase64Payload(payloadBase64, audioDecodeBuffer, sizeof(audioDecodeBuffer));
-  if (decodedLen == 0) {
-    cameraServer.send(400, "application/json", "{\"ok\":false,\"reason\":\"decode_failed\"}");
-    return;
-  }
-  size_t sampleCount = static_cast<size_t>(doc["samples"] | static_cast<int>(AUDIO_STREAM_SAMPLES));
-  sampleCount = min(sampleCount, static_cast<size_t>(AUDIO_STREAM_SAMPLES));
-  size_t pcmSamples = decodeAdpcmBlock(audioDecodeBuffer, decodedLen, audioPlaybackBuffer, sampleCount);
-  if (pcmSamples > 0) {
-    playSpeakerSamples(audioPlaybackBuffer, pcmSamples);
-  }
-  cameraServer.send(200, "application/json", "{\"ok\":true}");
+// HPF + 노이즈게이트 + 소프트게인
+int16_t filterSample(int16_t raw) {
+  int32_t in=raw;
+  hpfState=(HPF_N*(hpfState+in-hpfPrev))/HPF_D; hpfPrev=in;
+  int32_t v=hpfState;
+  if (abs(v)<NGATE) v=0;
+  return (int16_t)constrain(v*GAIN,-32768,32767);
 }
 
-void handleWifiScan() {
-  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
-  int scanResult = WiFi.scanComplete();
-
-  if (scanResult == WIFI_SCAN_FAILED) {
-    WiFi.scanNetworks(true, false, false, 300);
-    cameraServer.send(202, "application/json", "{\"scanning\":true}");
-    Serial.println("[SCAN] started async scan");
-    return;
+// IMA-ADPCM 인코더
+uint8_t adpcmNibble(int16_t s, int16_t& p, int8_t& si) {
+  int step=IMA_STP[si], diff=s-p;
+  uint8_t n=(diff<0)?(diff=-diff,8):0;
+  int delta=step>>3;
+  if (diff>=step)       { n|=4; diff-=step;     delta+=step;    }
+  if (diff>=(step>>1))  { n|=2; diff-=step>>1;  delta+=step>>1; }
+  if (diff>=(step>>2))  { n|=1; delta+=step>>2; }
+  p=constrain(p+((n&8)?-delta:delta),-32768,32767);
+  si=constrain(si+IMA_IDX[n&0xF],0,88);
+  return n&0xF;
+}
+size_t encodeAdpcm(const int16_t* in, size_t n, uint8_t* out) {
+  if (!n) return 0;
+  int16_t p=in[0]; int8_t si=adpcmStep;
+  out[0]=p&0xFF; out[1]=(p>>8)&0xFF; out[2]=(uint8_t)si; out[3]=0;
+  size_t i=ADPCM_HDR;
+  for (size_t k=1;k<n;k+=2) {
+    uint8_t lo=adpcmNibble(in[k],p,si);
+    uint8_t hi=(k+1<n)?adpcmNibble(in[k+1],p,si):0;
+    out[i++]=lo|(hi<<4);
   }
+  adpcmStep=si; return i;
+}
 
-  if (scanResult == WIFI_SCAN_RUNNING) {
-    cameraServer.send(202, "application/json", "{\"scanning\":true}");
-    return;
-  }
-
-  DynamicJsonDocument doc(2048);
-  doc["scanning"] = false;
-  JsonArray networks = doc.createNestedArray("networks");
-
-  if (scanResult > 0) {
-    for (int i = 0; i < scanResult && i < 20; i++) {
-      JsonObject net = networks.createNestedObject();
-      net["ssid"]   = WiFi.SSID(i);
-      net["rssi"]   = WiFi.RSSI(i);
-      net["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+// IMA-ADPCM 디코더
+size_t decodeAdpcm(const uint8_t* in, size_t inN, int16_t* out, size_t maxN) {
+  if (!in||!out||inN<ADPCM_HDR||!maxN) return 0;
+  int16_t p=(int16_t)(in[0]|((uint16_t)in[1]<<8));
+  int8_t  si=(int8_t)constrain((int)in[2],0,88);
+  size_t oi=0; out[oi++]=p;
+  for (size_t i=ADPCM_HDR;i<inN&&oi<maxN;i++) {
+    for (int nb=0;nb<2&&oi<maxN;nb++) {
+      uint8_t n=(nb==0)?(in[i]&0xF):((in[i]>>4)&0xF);
+      int step=IMA_STP[si], diff=step>>3;
+      if (n&1) diff+=step>>2; if (n&2) diff+=step>>1; if (n&4) diff+=step;
+      p=constrain(p+((n&8)?-diff:diff),-32768,32767);
+      si=constrain(si+IMA_IDX[n],0,88);
+      out[oi++]=p;
     }
   }
-  WiFi.scanDelete();
-
-  JsonObject saved = doc.createNestedObject("saved");
-  for (uint8_t i = 0; i < rememberedWifiCount; i++) {
-    saved[rememberedSsids[i]] = rememberedPasswords[i];
-  }
-
-  String payload;
-  serializeJson(doc, payload);
-  cameraServer.send(200, "application/json", payload);
-  Serial.printf("[SCAN] returned %d networks\n", scanResult);
+  return oi;
 }
 
-void handleWifiConnect() {
-  cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
-
-  StaticJsonDocument<256> doc;
-  DeserializationError err = deserializeJson(doc, cameraServer.arg("plain"));
-  if (err) {
-    cameraServer.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_json\"}");
-    return;
-  }
-
-  String ssid     = String(doc["ssid"] | "");
-  String password = String(doc["password"] | "");
-  bool secure = doc["secure"].isNull() ? true : static_cast<bool>(doc["secure"]);
-  ssid.trim();
-  password.trim();
-
-  if (ssid.length() == 0) {
-    cameraServer.send(400, "application/json", "{\"ok\":false,\"reason\":\"ssid_required\"}");
-    return;
-  }
-
-  // Open network should preserve an explicitly empty password.
-  if (secure && password.length() == 0) {
-    String saved = getRememberedPassword(ssid);
-    if (saved.length() > 0) {
-      password = saved;
-    }
-  }
-
-  // broker 정보는 기존 것 유지
-  saveConfig(ssid, password, activeBrokerHost, activeBrokerPort, activeDeviceId);
-  setConnectOnBoot(false);
-
-  cameraServer.send(200, "application/json", "{\"ok\":true}");
-  Serial.printf("[CFG] wifi-connect ssid=%s -> broker transition\n", ssid.c_str());
-  brokerModeTransitionAt = millis() + AP_TO_BROKER_TRANSITION_MS;
+size_t b64Decode(const char* enc, uint8_t* out, size_t sz) {
+  if (!enc||!out||!sz) return 0;
+  size_t dl=0;
+  return mbedtls_base64_decode(out,sz,&dl,(const unsigned char*)enc,strlen(enc))==0?dl:0;
 }
 
-
-void uploadVideoFrameIfNeeded() {
-  if (!cameraReady || !wsConnected) {
-    return;
+void playSamples(const int16_t* s, size_t n) {
+  if (!spkReady||!s||!n) return;
+  for (size_t i=0;i<n;i++){
+    spkBuf[i*4]=spkBuf[i*4+2]=s[i]&0xFF;
+    spkBuf[i*4+1]=spkBuf[i*4+3]=(s[i]>>8)&0xFF;
   }
-
-  const bool inGracePeriod = (wsConnectedAt == 0) ||
-    ((millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS);
-
-  unsigned long current = millis();
-  if (current - lastVideoUploadAt < VIDEO_UPLOAD_INTERVAL_MS) {
-    return;
-  }
-
-  std::unique_ptr<uint8_t[]> frameCopy;
-  size_t frameLen = 0;
-  if (!copyLatestJpegFrame(frameCopy, frameLen)) {
-    Serial.println("[CAM] upload cached frame unavailable");
-    return;
-  }
-
-  bool sent = wsSendBinary(frameCopy.get(), frameLen);
-
-  if (sent) {
-    brokerVideoFailCount = 0;
-    lastVideoUploadAt = current;
-  } else {
-    if (inGracePeriod) {
-      brokerVideoFailCount = 0;
-      return;
-    }
-    Serial.println("[CAM] upload frame failed");
-    brokerVideoFailCount++;
-    if (brokerVideoFailCount >= BROKER_RECOVERY_VIDEO_FAILS) {
-      scheduleBrokerRecovery("video_upload_failed");
-    }
-  }
+  spk.write(spkBuf,n*4);
 }
 
-int16_t filterAudioSample(int16_t sample) {
-  int32_t input = sample;
-  audioHighpassState =
-    (AUDIO_HPF_ALPHA_NUM * (audioHighpassState + input - audioHighpassLastInput)) / AUDIO_HPF_ALPHA_DEN;
-  audioHighpassLastInput = input;
-
-  int32_t filtered = audioHighpassState;
-  if (abs(filtered) < AUDIO_NOISE_GATE) {
-    filtered = 0;
+// 부팅/전환 효과음
+void playTone(uint32_t hz, int16_t amp, size_t cnt) {
+  uint32_t half=SRATE/(hz*2); if (!half) half=1;
+  int16_t v=amp;
+  for (size_t i=0;i<cnt;i++) {
+    if (i%half==0) v=-v;
+    uint8_t f[4]={(uint8_t)(v&0xFF),(uint8_t)((v>>8)&0xFF),(uint8_t)(v&0xFF),(uint8_t)((v>>8)&0xFF)};
+    spk.write(f,4);
   }
-
-  filtered *= AUDIO_SOFTWARE_GAIN;
-  filtered = constrain(filtered, -32768, 32767);
-  return static_cast<int16_t>(filtered);
+}
+void playSilence(size_t cnt){ uint8_t f[4]={0}; for(size_t i=0;i<cnt;i++) spk.write(f,4); }
+void bootTone()       { if (spkReady) playTone(880,2800,SRATE/12); }
+void transitionTone() {
+  if (!spkReady) return;
+  playTone(880,2600,SRATE/20);  playSilence(SRATE/80);
+  playTone(1320,2600,SRATE/20);
 }
 
-uint8_t encodeAdpcmNibble(int16_t sample, int16_t& predictor, int8_t& stepIndex) {
-  int step = IMA_STEP_TABLE[stepIndex];
-  int diff = sample - predictor;
-  uint8_t nibble = 0;
-
-  if (diff < 0) {
-    nibble = 8;
-    diff = -diff;
-  }
-
-  int delta = step >> 3;
-  if (diff >= step) {
-    nibble |= 4;
-    diff -= step;
-    delta += step;
-  }
-  if (diff >= (step >> 1)) {
-    nibble |= 2;
-    diff -= step >> 1;
-    delta += step >> 1;
-  }
-  if (diff >= (step >> 2)) {
-    nibble |= 1;
-    delta += step >> 2;
-  }
-
-  predictor += (nibble & 8) ? -delta : delta;
-  predictor = constrain(predictor, -32768, 32767);
-
-  stepIndex += IMA_INDEX_TABLE[nibble & 0x0F];
-  stepIndex = constrain(stepIndex, 0, 88);
-  return nibble & 0x0F;
+// ============================================================
+//  배터리
+// ============================================================
+uint32_t batMv()  { return analogReadMilliVolts(PIN_BAT)*2U; }
+uint8_t  batPct(uint32_t mv) {
+  return (uint8_t)constrain(map((long)constrain(mv,6400UL,8400UL),6400L,8400L,0L,100L),0L,100L);
 }
 
-size_t encodeAdpcmBlock(const int16_t* input, size_t sampleCount, uint8_t* output) {
-  if (sampleCount == 0) {
-    return 0;
-  }
-
-  int16_t predictor = input[0];
-  int8_t stepIndex = audioAdpcmStepIndex;
-  output[0] = static_cast<uint8_t>(predictor & 0xFF);
-  output[1] = static_cast<uint8_t>((predictor >> 8) & 0xFF);
-  output[2] = static_cast<uint8_t>(stepIndex);
-  output[3] = 0;
-
-  size_t outIndex = AUDIO_ADPCM_HEADER_BYTES;
-  for (size_t i = 1; i < sampleCount; i += 2) {
-    uint8_t low = encodeAdpcmNibble(input[i], predictor, stepIndex);
-    uint8_t high = 0;
-    if (i + 1 < sampleCount) {
-      high = encodeAdpcmNibble(input[i + 1], predictor, stepIndex);
-    }
-    output[outIndex++] = static_cast<uint8_t>(low | (high << 4));
-  }
-
-  audioAdpcmStepIndex = stepIndex;
-  return outIndex;
+// ============================================================
+//  NVS 설정
+// ============================================================
+bool loadConfig() {
+  nvs.begin(NVS_NS,true);
+  cfgSsid=nvs.getString(NVS_SSID,""); cfgPass=nvs.getString(NVS_PASS,"");
+  cfgHost=nvs.getString(NVS_HOST,""); cfgPort=nvs.getUShort(NVS_PORT,0);
+  cfgId  =nvs.getString(NVS_ID,"");
+  nvs.end();
+  if (cfgSsid.isEmpty()&&strlen(WIFI_SSID)>0){cfgSsid=WIFI_SSID;cfgPass=WIFI_PASSWORD;}
+  if (cfgHost.isEmpty()&&strlen(BROKER_HOST)>0) cfgHost=BROKER_HOST;
+  if (!cfgPort)  cfgPort=(uint16_t)BROKER_PORT;
+  if (cfgId.isEmpty()&&strlen(DEVICE_ID)>0) cfgId=DEVICE_ID;
+  if (cfgId.isEmpty()) cfgId=DEF_ID;
+  hasWifi=!cfgSsid.isEmpty();
+  Serial.printf("[CFG] ssid=%s broker=%s:%u id=%s\n",
+    cfgSsid.c_str(),cfgHost.c_str(),cfgPort,cfgId.c_str());
+  return hasWifi;
+}
+void saveConfig(const String& ss,const String& ps,
+                const String& bh,uint16_t bp,const String& id) {
+  nvs.begin(NVS_NS,false);
+  nvs.putString(NVS_SSID,ss); nvs.putString(NVS_PASS,ps);
+  nvs.putString(NVS_HOST,bh); nvs.putUShort(NVS_PORT,bp);
+  nvs.putString(NVS_ID,id);
+  nvs.end();
+  cfgSsid=ss;cfgPass=ps;cfgHost=bh;cfgPort=bp;cfgId=id;hasWifi=true;
+  Serial.printf("[CFG] saved %s -> %s:%u\n",ss.c_str(),bh.c_str(),bp);
 }
 
-size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize) {
-  if (encoded == nullptr || output == nullptr || outputSize == 0) {
-    return 0;
+void loadMemWifi() {
+  memCnt=0; nvs.begin(NVS_NS,true); String j=nvs.getString(NVS_MEM,""); nvs.end();
+  if (j.isEmpty()){ if(!cfgSsid.isEmpty()){memSsid[0]=cfgSsid;memPass[0]=cfgPass;memCnt=1;} return; }
+  StaticJsonDocument<512> doc; if (deserializeJson(doc,j)) return;
+  for (JsonObject o:doc["items"].as<JsonArray>()) {
+    if (memCnt>=WIFI_MEM_MAX) break;
+    String s=o["ssid"]|""; if(s.isEmpty()) continue;
+    memSsid[memCnt]=s; memPass[memCnt]=String(o["password"]|""); memCnt++;
   }
-
-  size_t decodedLen = 0;
-  int rc = mbedtls_base64_decode(output, outputSize, &decodedLen,
-    reinterpret_cast<const unsigned char*>(encoded), strlen(encoded));
-  if (rc != 0) {
-    return 0;
-  }
-  return decodedLen;
+}
+void saveMemWifi() {
+  StaticJsonDocument<512> doc; JsonArray a=doc.createNestedArray("items");
+  for (uint8_t i=0;i<memCnt;i++){JsonObject o=a.createNestedObject();o["ssid"]=memSsid[i];o["password"]=memPass[i];}
+  String j; serializeJson(doc,j);
+  nvs.begin(NVS_NS,false); nvs.putString(NVS_MEM,j); nvs.end();
+}
+void rememberWifi(const String& ss,const String& ps) {
+  if (ss.isEmpty()) return;
+  int idx=-1;
+  for (uint8_t i=0;i<memCnt;i++) if (memSsid[i]==ss){idx=i;break;}
+  if (idx==0){memPass[0]=ps;saveMemWifi();return;}
+  int top=(idx>0)?idx:(memCnt<WIFI_MEM_MAX?(int)memCnt++:WIFI_MEM_MAX-1);
+  for (int i=top;i>0;i--){memSsid[i]=memSsid[i-1];memPass[i]=memPass[i-1];}
+  memSsid[0]=ss; memPass[0]=ps; saveMemWifi();
+}
+String recallPass(const String& ss) {
+  for (uint8_t i=0;i<memCnt;i++) if(memSsid[i]==ss) return memPass[i]; return "";
 }
 
-size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples) {
-  if (input == nullptr || output == nullptr || inputLen < AUDIO_ADPCM_HEADER_BYTES || maxSamples == 0) {
-    return 0;
-  }
-
-  int16_t predictor = static_cast<int16_t>(input[0] | (static_cast<uint16_t>(input[1]) << 8));
-  int8_t stepIndex = static_cast<int8_t>(constrain(static_cast<int>(input[2]), 0, 88));
-  size_t outIndex = 0;
-  output[outIndex++] = predictor;
-
-  for (size_t i = AUDIO_ADPCM_HEADER_BYTES; i < inputLen && outIndex < maxSamples; ++i) {
-    uint8_t packed = input[i];
-    for (uint8_t nibbleIndex = 0; nibbleIndex < 2 && outIndex < maxSamples; ++nibbleIndex) {
-      uint8_t nibble = (nibbleIndex == 0) ? (packed & 0x0F) : ((packed >> 4) & 0x0F);
-      int step = IMA_STEP_TABLE[stepIndex];
-      int diff = step >> 3;
-      if (nibble & 1) diff += step >> 2;
-      if (nibble & 2) diff += step >> 1;
-      if (nibble & 4) diff += step;
-
-      predictor += (nibble & 8) ? -diff : diff;
-      predictor = constrain(predictor, static_cast<int16_t>(-32768), static_cast<int16_t>(32767));
-      stepIndex = static_cast<int8_t>(constrain(stepIndex + IMA_INDEX_TABLE[nibble], 0, 88));
-      output[outIndex++] = predictor;
-    }
-  }
-
-  return outIndex;
+// ============================================================
+//  AP 모드 / 브로커 모드 전환
+// ============================================================
+void startAP() {
+  if (apMode) return;
+  safeStop();
+  wsDisconnect(); wsReady=false; wsConnectedAt=0; wsFlying=false;
+  clientOnline=false; clientCount=0;
+  WiFi.disconnect(true,true); delay(100);
+  WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID,AP_PASS);
+  apMode=true; wifiFlying=false; drainMic();
+  Serial.printf("[AP] up ip=%s\n",WiFi.softAPIP().toString().c_str());
 }
 
-void playSpeakerSamples(const int16_t* samples, size_t sampleCount) {
-  if (!speakerReady || samples == nullptr || sampleCount == 0) {
-    return;
-  }
-
-  for (size_t i = 0; i < sampleCount; ++i) {
-    int16_t sample = samples[i];
-    size_t offset = i * 4;
-    speakerFrameBuffer[offset + 0] = static_cast<uint8_t>(sample & 0xff);
-    speakerFrameBuffer[offset + 1] = static_cast<uint8_t>((sample >> 8) & 0xff);
-    speakerFrameBuffer[offset + 2] = static_cast<uint8_t>(sample & 0xff);
-    speakerFrameBuffer[offset + 3] = static_cast<uint8_t>((sample >> 8) & 0xff);
-  }
-
-  speaker.write(speakerFrameBuffer, sampleCount * 4);
+void enterBrokerMode() {
+  if (!apMode) { transAt=0; return; }
+  Serial.println("[CFG] -> broker mode");
+  transitionTone(); transAt=0;
+  safeStop();
+  wsReady=false; wsConnectedAt=0; wsFlying=false; wifiFlying=false;
+  clientOnline=false; clientCount=0;
+  wsNextAt=0; wifiAt=0; audAt=0; wsRetryMs=WS_RETRY_MIN;
+  wsDisconnect(); drainMic();
+  WiFi.softAPdisconnect(true); delay(100);
+  WiFi.mode(WIFI_STA); apMode=false;
 }
 
-void drainMicrophoneInput() {
-  if (!microphoneReady) {
-    return;
-  }
-
-  uint8_t drainedBlocks = 0;
-  while (drainedBlocks < 2 && microphone.available() >= static_cast<int>(AUDIO_CAPTURE_BYTES)) {
-    size_t bytesRead = microphone.readBytes(reinterpret_cast<char*>(audioCaptureBuffer), AUDIO_CAPTURE_BYTES);
-    if (bytesRead != AUDIO_CAPTURE_BYTES) {
+// ============================================================
+//  WebSocket 이벤트 핸들러
+// ============================================================
+void onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
+  switch (type) {
+    case WStype_CONNECTED:
+      wsReady=true; wsFlying=false; wsConnectedAt=millis();
+      clientOnline=false; clientCount=0; wsRetryMs=WS_RETRY_MIN;
+      drainMic();
+      Serial.println("[WS] connected");
       break;
-    }
-    drainedBlocks++;
-  }
-}
 
-void uploadAudioChunkIfNeeded() {
-  unsigned long current = millis();
-  const bool hasLocalAudioClients = localAudioWsStarted && localAudioWs.connectedClients() > 0;
-  const bool brokerAudioCoolingDown = current < brokerAudioMutedUntil;
-  const bool shouldSendBrokerAudio = wsConnected && brokerClientPresent && !brokerAudioCoolingDown;
-  if (!microphoneReady || talkEnabled || (!shouldSendBrokerAudio && !hasLocalAudioClients)) {
-    if (!shouldSendBrokerAudio && !hasLocalAudioClients) {
-      drainMicrophoneInput();
-    }
-    return;
-  }
+    case WStype_DISCONNECTED:
+      wsReady=false; wsFlying=false; wsConnectedAt=0;
+      clientOnline=false; clientCount=0;
+      safeStop();
+      wsNextAt=millis()+wsRetryMs;
+      wsRetryMs=min(wsRetryMs*2UL, WS_RETRY_MAX);
+      Serial.printf("[WS] disconnected, retry %lums\n", wsRetryMs/2);
+      break;
 
-  if (shouldSendBrokerAudio) {
-    if (wsConnectedAt == 0 || (current - wsConnectedAt) < BROKER_AUDIO_START_DELAY_MS) {
-      return;
-    }
-  }
-  if (current - lastAudioUploadAt < AUDIO_UPLOAD_INTERVAL_MS) {
-    return;
-  }
+    case WStype_TEXT: {
+      StaticJsonDocument<256> doc;
+      if (deserializeJson(doc,payload,len)) return;
+      const char* t=doc["type"]|"";
 
-  if (microphone.available() < static_cast<int>(AUDIO_CAPTURE_BYTES)) {
-    return;
-  }
+      if (!strcmp(t,"pong")) { /* OK */ }
 
-  size_t bytesRead = microphone.readBytes(reinterpret_cast<char*>(audioCaptureBuffer), AUDIO_CAPTURE_BYTES);
-  if (bytesRead != AUDIO_CAPTURE_BYTES) {
-    Serial.printf("[MIC] short read: %u\n", static_cast<unsigned>(bytesRead));
-    return;
-  }
-
-  for (size_t i = 0; i < AUDIO_STREAM_SAMPLES; i++) {
-    audioCaptureBuffer[i] = filterAudioSample(audioCaptureBuffer[i]);
-  }
-
-  size_t adpcmLen = encodeAdpcmBlock(audioCaptureBuffer, AUDIO_STREAM_SAMPLES, audioAdpcmBuffer);
-  int encodedLen = base64_encode_chars(reinterpret_cast<const char*>(audioAdpcmBuffer), adpcmLen, audioBase64Buffer);
-  if (encodedLen <= 0 || encodedLen >= static_cast<int>(sizeof(audioBase64Buffer))) {
-    Serial.println("[MIC] base64 encode failed");
-    return;
-  }
-  audioBase64Buffer[encodedLen] = '\0';
-
-  StaticJsonDocument<512> doc;
-  doc["type"] = "audio";
-  doc["codec"] = "adpcm_ima";
-  doc["sampleRate"] = AUDIO_STREAM_SAMPLE_RATE;
-  doc["samples"] = AUDIO_STREAM_SAMPLES;
-  doc["seq"] = audioSequence++;
-  doc["payload"] = audioBase64Buffer;
-
-  String payload;
-  serializeJson(doc, payload);
-  bool sent = false;
-  if (shouldSendBrokerAudio) {
-    sent = wsSendText(payload);
-    if (!sent) {
-      Serial.println("[MIC] broker upload failed");
-      if (wsConnectedAt == 0 || (millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS) {
-        brokerAudioFailCount = 0;
-      } else {
-        brokerAudioFailCount++;
-        if (brokerAudioFailCount >= BROKER_RECOVERY_AUDIO_FAILS) {
-          brokerAudioFailCount = 0;
-          brokerAudioMutedUntil = millis() + BROKER_AUDIO_FAIL_COOLDOWN_MS;
-          drainMicrophoneInput();
-          Serial.println("[MIC] broker audio cooldown");
+      else if (!strcmp(t,"hello")) {
+        Serial.println("[WS] hello from broker");
+      }
+      else if (!strcmp(t,"client_state")) {
+        clientCount=(uint16_t)(doc["clients"]|0);
+        clientOnline=clientCount>0;
+        if (clientOnline) {
+          wsConnectedAt=millis();  // 오디오 딜레이 타이머 리셋
+          Serial.printf("[WS] clients=%u\n",clientCount);
+        } else {
+          drainMic();
+          Serial.println("[WS] no clients");
         }
       }
-    } else {
-      brokerAudioFailCount = 0;
-    }
-  }
-  if (hasLocalAudioClients) {
-    localAudioWs.broadcastTXT(payload);
-    sent = true;
-  }
-  if (!sent) {
-    return;
-  }
-
-  lastAudioUploadAt = current;
-}
-
-void connectWebSocket() {
-  if (apMode || WiFi.status() != WL_CONNECTED) {
-    return;
-  }
-
-  configureWebSocket();
-  if (activeDeviceId.length() == 0) {
-    activeDeviceId = DEFAULT_DEVICE_ID;
-  }
-  Serial.printf("[WS] target=%s:%u deviceId=%s\n", activeBrokerHost.c_str(), activeBrokerPort, activeDeviceId.c_str());
-  if (!lockWs()) {
-    Serial.println("[WS] mutex busy during begin");
-    return;
-  }
-  ws.begin(activeBrokerHost.c_str(), activeBrokerPort, String("/device?deviceId=") + activeDeviceId);
-  unlockWs();
-  wsConnectStartedAt = millis();
-  wsConnectInFlight = true;
-}
-
-void ensureWifiConnected() {
-  if (apMode) {
-    return;
-  }
-
-  if (restartScheduledAt != 0) {
-    return;
-  }
-
-  if (!hasStoredWifi) {
-    startProvisioningAp();
-    return;
-  }
-
-  wl_status_t wifiStatus = WiFi.status();
-  if (wifiStatus == WL_CONNECTED) {
-    wifiConnectInFlight = false;
-    wifiFailureCount = 0;
-    return;
-  }
-
-  unsigned long current = millis();
-
-  if (wifiConnectInFlight) {
-    if (current - wifiConnectStartedAt >= WIFI_CONNECT_TIMEOUT_MS) {
-      Serial.println("[WIFI] connect timeout, retrying");
-      WiFi.disconnect(true, true);
-      wifiConnectInFlight = false;
-      lastWifiAttemptAt = current;
-      wifiFailureCount++;
-      if (wifiFailureCount >= WIFI_FAILURES_BEFORE_AP) {
-        Serial.println("[WIFI] falling back to AP mode");
-        startProvisioningAp();
+      else if (!strcmp(t,"ctrl")) {
+        if (driveMode) {
+          curThr=constrain((int)(doc["throttle"]|0),-100,100);
+          curStr=constrain((int)(doc["steering"]|0),-100,100);
+          cmdAt=millis();
+          motorWrite(curThr); servoWrite(curStr);
+        }
       }
+      else if (!strcmp(t,"led")) {
+        ledOn=doc["enabled"]|false;
+        if (PIN_LED>=0) digitalWrite(PIN_LED,ledOn?HIGH:LOW);
+      }
+      else if (!strcmp(t,"mode")) {
+        driveMode=strcmp(doc["mode"]|"drive","monitor")!=0;
+        if (!driveMode) safeStop();
+        Serial.printf("[MODE] %s\n",driveMode?"drive":"monitor");
+      }
+      else if (!strcmp(t,"talk")) {
+        talkOn=doc["enabled"]|false;
+        Serial.printf("[TALK] %s\n",talkOn?"on":"off");
+      }
+      else if (!strcmp(t,"talk_audio")) {
+        if (!spkReady) return;
+        size_t dl=b64Decode(doc["payload"]|"",decBuf,sizeof(decBuf));
+        if (!dl) return;
+        size_t sc=min((size_t)(doc["samples"]|(int)CHUNK),CHUNK);
+        size_t pcm=decodeAdpcm(decBuf,dl,playBuf,sc);
+        if (pcm) playSamples(playBuf,pcm);
+      }
+      else if (!strcmp(t,"camera_quality")) {
+        setCamQuality(doc["quality"]|"QVGA");
+      }
+      break;
+    }
+    case WStype_ERROR:
+      Serial.println("[WS] error");
+      break;
+    default: break;
+  }
+}
+
+// ============================================================
+//  WiFi / WS 연결 관리 (루프에서 호출)
+// ============================================================
+void manageWifi() {
+  if (apMode) return;
+  if (!hasWifi) { startAP(); return; }
+  if (WiFi.status()==WL_CONNECTED) { wifiFlying=false; wifiFails=0; return; }
+  unsigned long now=millis();
+  if (wifiFlying) {
+    if (now-wifiStartAt>=WIFI_TIMEOUT_MS) {
+      Serial.println("[WIFI] timeout");
+      WiFi.disconnect(true,true); wifiFlying=false; wifiAt=now;
+      if (++wifiFails>=WIFI_FAIL_BEFORE_AP) { Serial.println("[WIFI] -> AP"); startAP(); }
     }
     return;
   }
-
-  if (current - lastWifiAttemptAt < WIFI_RETRY_MS) {
-    return;
-  }
-
-  lastWifiAttemptAt = current;
-  wifiConnectStartedAt = current;
-  wifiConnectInFlight = true;
-  Serial.printf("[WIFI] connecting to %s\n", activeWifiSsid.c_str());
+  if (now-wifiAt<WIFI_RETRY_MS) return;
+  wifiAt=now; wifiStartAt=now; wifiFlying=true;
+  Serial.printf("[WIFI] connecting %s\n",cfgSsid.c_str());
   WiFi.mode(WIFI_STA);
-  if (activeWifiPassword.length() == 0) {
-    WiFi.begin(activeWifiSsid.c_str());
-  } else {
-    WiFi.begin(activeWifiSsid.c_str(), activeWifiPassword.c_str());
-  }
+  if (cfgPass.isEmpty()) WiFi.begin(cfgSsid.c_str());
+  else                   WiFi.begin(cfgSsid.c_str(),cfgPass.c_str());
 }
 
-void ensureWebSocketConnected() {
-  if (apMode || !WiFi.isConnected()) {
-    wsConnected = false;
-    wsConnectInFlight = false;
-    return;
-  }
-
-  if (wsConnected) {
-    return;
-  }
-
-  if (wsConnectInFlight) {
-    if (millis() - wsConnectStartedAt >= WS_CONNECT_TIMEOUT_MS) {
+void manageWs() {
+  if (apMode||!WiFi.isConnected()) { wsReady=false; wsFlying=false; return; }
+  if (wsReady) return;
+  if (wsFlying) {
+    if (millis()-wsAt>=WS_TIMEOUT_MS) {
       Serial.println("[WS] connect timeout");
-      safeStop();
-      wsDisconnectSafe();
-      scheduleReconnect();
+      safeStop(); wsDisconnect(); wsFlying=false; wsConnectedAt=0;
+      wsNextAt=millis()+wsRetryMs;
+      wsRetryMs=min(wsRetryMs*2UL,WS_RETRY_MAX);
     }
     return;
   }
-
-  if (millis() < nextReconnectAt) {
-    return;
-  }
-
-  Serial.println("[WS] connecting");
-  connectWebSocket();
+  if (millis()<wsNextAt) return;
+  if (!wsConfigured) { brokerWs.onEvent(onWsEvent); brokerWs.setReconnectInterval(0); wsConfigured=true; }
+  Serial.printf("[WS] -> %s:%u\n",cfgHost.c_str(),cfgPort);
+  if (lockWs()) { brokerWs.begin(cfgHost.c_str(),cfgPort,"/device?deviceId="+cfgId); unlockWs(); }
+  wsAt=millis(); wsFlying=true;
 }
 
-void sendPingIfNeeded() {
-  if (!wsConnected) {
-    return;
-  }
-
-  unsigned long current = millis();
-  if (current - lastPingAt < PING_INTERVAL_MS) {
-    return;
-  }
-
-  StaticJsonDocument<64> doc;
-  doc["type"] = "ping";
-
-  String payload;
-  serializeJson(doc, payload);
-  bool ok = wsSendText(payload);
-  lastPingAt = current;
-
-  if (!ok) {
-    pingFailCount++;
-    Serial.printf("[WS] ping send failed (%u)\n", pingFailCount);
-    if (pingFailCount >= BROKER_RECOVERY_PING_FAILS) {
-      scheduleBrokerRecovery("ping_send_failed");
-    } else if (pingFailCount >= MAX_PING_FAILS) {
-      safeStop();
-      wsDisconnectSafe();
-      scheduleReconnect();
-    }
-  }
+// ============================================================
+//  주기적 송신
+// ============================================================
+void sendPing() {
+  if (!wsReady||millis()-pingAt<PING_MS) return;
+  pingAt=millis();
+  String p="{\"type\":\"ping\"}"; wsSendText(p);
 }
 
+void sendStatus() {
+  if (!wsReady||millis()-statAt<STATUS_MS) return;
+  statAt=millis();
+  StaticJsonDocument<160> doc;
+  doc["type"]="status"; doc["rssi"]=WiFi.RSSI(); doc["uptime"]=millis();
+  doc["throttle"]=curThr; doc["steering"]=curStr;
+  doc["cameraReady"]=camReady; doc["audioReady"]=micReady;
+  doc["audioCodec"]="adpcm_ima"; doc["audioSampleRate"]=SRATE;
+  doc["mode"]=driveMode?"drive":"monitor";
+  doc["ledEnabled"]=ledOn; doc["talkEnabled"]=talkOn;
+  uint32_t mv=batMv(); doc["batteryMv"]=mv; doc["batteryPct"]=batPct(mv);
+  doc["apMode"]=apMode; doc["localIp"]=WiFi.localIP().toString();
+  String p; serializeJson(doc,p); wsSendText(p);
+}
+
+void sendAudio() {
+  unsigned long now=millis();
+  bool hasLocal=lwsReady&&localWs.connectedClients()>0;
+  bool doBroker=wsReady&&clientOnline&&wsConnectedAt!=0&&(now-wsConnectedAt)>=AUDIO_DELAY_MS;
+
+  if (!micReady||talkOn||(!doBroker&&!hasLocal)) {
+    if (!doBroker&&!hasLocal) drainMic();
+    return;
+  }
+  if (now-audAt<AUDIO_MS) return;
+  if (mic.available()<(int)CHUNK_BYTES) return;
+  if (mic.readBytes((char*)capBuf,CHUNK_BYTES)!=CHUNK_BYTES) return;
+
+  for (size_t i=0;i<CHUNK;i++) capBuf[i]=filterSample(capBuf[i]);
+  size_t aLen=encodeAdpcm(capBuf,CHUNK,adpcmBuf);
+  int bLen=base64_encode_chars((const char*)adpcmBuf,aLen,b64Buf);
+  if (bLen<=0||bLen>=(int)B64_BYTES) return;
+  b64Buf[bLen]='\0';
+
+  StaticJsonDocument<512> doc;
+  doc["type"]="audio"; doc["codec"]="adpcm_ima";
+  doc["sampleRate"]=SRATE; doc["samples"]=CHUNK;
+  doc["seq"]=audSeq++; doc["payload"]=b64Buf;
+  String p; serializeJson(doc,p);
+
+  bool sent=false;
+  if (doBroker)  sent=wsSendText(p);
+  if (hasLocal) { localWs.broadcastTXT(p); sent=true; }
+  // 성공/실패 모두 타임스탬프 갱신 → 인터벌 유지
+  audAt=now;
+}
+
+// ============================================================
+//  HTTP 핸들러
+// ============================================================
+void hRoot() {
+  httpSrv.sendHeader("Cache-Control","no-cache,no-store,must-revalidate");
+  httpSrv.send_P(200,"text/html; charset=utf-8",WEB_INDEX_HTML);
+}
+
+void hStatus() {
+  httpSrv.sendHeader("Access-Control-Allow-Origin","*");
+  StaticJsonDocument<192> doc;
+  doc["apMode"]=apMode;
+  doc["ip"]=apMode?WiFi.softAPIP().toString():WiFi.localIP().toString();
+  doc["rssi"]=WiFi.isConnected()?WiFi.RSSI():0;
+  uint32_t mv=batMv(); doc["batteryMv"]=mv; doc["batteryPct"]=batPct(mv);
+  doc["mode"]=driveMode?"drive":"monitor"; doc["ledEnabled"]=ledOn;
+  doc["throttle"]=curThr; doc["steering"]=curStr; doc["wsConnected"]=wsReady;
+  String p; serializeJson(doc,p); httpSrv.send(200,"application/json",p);
+}
+
+void hControl() {
+  httpSrv.sendHeader("Access-Control-Allow-Origin","*");
+  if (apMode){httpSrv.send(403,"application/json","{\"ok\":false}");return;}
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc,httpSrv.arg("plain"))){httpSrv.send(400,"application/json","{\"ok\":false}");return;}
+  if (doc.containsKey("ledEnabled")){ledOn=doc["ledEnabled"]|false;if(PIN_LED>=0)digitalWrite(PIN_LED,ledOn?HIGH:LOW);}
+  if ((doc.containsKey("throttle")||doc.containsKey("steering"))&&driveMode){
+    curThr=constrain((int)(doc["throttle"]|curThr),-100,100);
+    curStr=constrain((int)(doc["steering"]|curStr),-100,100);
+    cmdAt=millis(); motorWrite(curThr); servoWrite(curStr);
+  }
+  if (doc.containsKey("quality")) setCamQuality(doc["quality"]|"QVGA");
+  httpSrv.send(200,"application/json","{\"ok\":true}");
+}
+
+void hConfigSave() {
+  String ss=httpSrv.arg("ssid");       ss.trim();
+  String ps=httpSrv.arg("password");   ps.trim();
+  String bh=httpSrv.arg("brokerHost"); bh.trim();
+  String bp=httpSrv.arg("brokerPort"); bp.trim();
+  String id=httpSrv.arg("deviceId");   id.trim();
+  if (ss.isEmpty()) ss=cfgSsid;
+  if (bh.isEmpty()) bh=cfgHost;
+  if (id.isEmpty()) id=cfgId;
+  if (ps.isEmpty()&&ss!=cfgSsid){ String r=recallPass(ss); if(!r.isEmpty()) ps=r; }
+  uint16_t port=cfgPort;
+  if (!bp.isEmpty()){ long v=bp.toInt(); if(v>0&&v<=65535) port=(uint16_t)v; }
+  if (ss.isEmpty()||bh.isEmpty()||id.isEmpty()||!port){httpSrv.send(400,"text/plain","invalid");return;}
+  saveConfig(ss,ps,bh,port,id); rememberWifi(ss,ps);
+  httpSrv.send(200,"text/html","<!doctype html><html><body><h1>Saved</h1><p>Connecting...</p></body></html>");
+  transAt=millis()+AP_DELAY_MS;
+}
+
+void hJpeg() {
+  if (apMode){httpSrv.send(410,"text/plain","ap mode");return;}
+  std::unique_ptr<uint8_t[]> f; size_t n=0;
+  if (!copyFrame(f,n)){httpSrv.send(503,"text/plain","no frame");return;}
+  WiFiClient c=httpSrv.client();
+  c.printf("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-cache\r\nContent-Length: %u\r\nConnection: close\r\n\r\n",(unsigned)n);
+  c.write(f.get(),n);
+}
+
+void hStream() { httpSrv.send(410,"text/plain","use /jpg"); }
+
+void hTalkAudio() {
+  httpSrv.sendHeader("Access-Control-Allow-Origin","*");
+  if (apMode||!spkReady){httpSrv.send(503,"application/json","{\"ok\":false}");return;}
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc,httpSrv.arg("plain"))){httpSrv.send(400,"application/json","{\"ok\":false}");return;}
+  size_t dl=b64Decode(doc["payload"]|"",decBuf,sizeof(decBuf));
+  if (!dl){httpSrv.send(400,"application/json","{\"ok\":false}");return;}
+  size_t sc=min((size_t)(doc["samples"]|(int)CHUNK),CHUNK);
+  size_t pcm=decodeAdpcm(decBuf,dl,playBuf,sc); if(pcm) playSamples(playBuf,pcm);
+  httpSrv.send(200,"application/json","{\"ok\":true}");
+}
+
+void hWifiScan() {
+  httpSrv.sendHeader("Access-Control-Allow-Origin","*");
+  int r=WiFi.scanComplete();
+  if (r==WIFI_SCAN_FAILED){WiFi.scanNetworks(true,false,false,300);httpSrv.send(202,"application/json","{\"scanning\":true}");return;}
+  if (r==WIFI_SCAN_RUNNING){httpSrv.send(202,"application/json","{\"scanning\":true}");return;}
+  DynamicJsonDocument doc(2048); doc["scanning"]=false;
+  JsonArray arr=doc.createNestedArray("networks");
+  for (int i=0;i<r&&i<20;i++){
+    JsonObject o=arr.createNestedObject();
+    o["ssid"]=WiFi.SSID(i); o["rssi"]=WiFi.RSSI(i);
+    o["secure"]=(WiFi.encryptionType(i)!=WIFI_AUTH_OPEN);
+  }
+  WiFi.scanDelete();
+  JsonObject sv=doc.createNestedObject("saved");
+  for (uint8_t i=0;i<memCnt;i++) sv[memSsid[i]]=memPass[i];
+  String p; serializeJson(doc,p); httpSrv.send(200,"application/json",p);
+}
+
+void hWifiConnect() {
+  httpSrv.sendHeader("Access-Control-Allow-Origin","*");
+  StaticJsonDocument<256> doc;
+  if (deserializeJson(doc,httpSrv.arg("plain"))){httpSrv.send(400,"application/json","{\"ok\":false}");return;}
+  String ss=String(doc["ssid"]|""); ss.trim();
+  String ps=String(doc["password"]|""); ps.trim();
+  bool sec=doc["secure"].isNull()?true:(bool)doc["secure"];
+  if (ss.isEmpty()){httpSrv.send(400,"application/json","{\"ok\":false,\"reason\":\"ssid_required\"}");return;}
+  if (sec&&ps.isEmpty()){String r=recallPass(ss);if(!r.isEmpty())ps=r;}
+  saveConfig(ss,ps,cfgHost,cfgPort,cfgId); rememberWifi(ss,ps);
+  httpSrv.send(200,"application/json","{\"ok\":true}");
+  transAt=millis()+AP_DELAY_MS;
+}
+
+void startHTTP() {
+  if (httpReady) return;
+  httpSrv.on("/",             HTTP_GET,  hRoot);
+  httpSrv.on("/api/status",   HTTP_GET,  hStatus);
+  httpSrv.on("/api/control",  HTTP_POST, hControl);
+  httpSrv.on("/api/config",   HTTP_POST, hConfigSave);
+  httpSrv.on("/api/wifi-scan",HTTP_GET,  hWifiScan);
+  httpSrv.on("/api/wifi-connect",HTTP_POST,hWifiConnect);
+  httpSrv.on("/api/talk-audio",HTTP_POST,hTalkAudio);
+  httpSrv.on("/jpg",          HTTP_GET,  hJpeg);
+  httpSrv.on("/stream",       HTTP_GET,  hStream);
+  httpSrv.onNotFound([]{httpSrv.send(404,"text/plain","not found");});
+  httpSrv.begin(); httpReady=true;
+
+  if (!apMode&&!lwsReady) {
+    localWs.begin();
+    localWs.onEvent([](uint8_t cn,WStype_t t,uint8_t* p,size_t l){
+      if (t==WStype_TEXT&&l==4&&!memcmp(p,"ping",4)) localWs.sendTXT(cn,"pong");
+    });
+    lwsReady=true; Serial.println("[WS-LOCAL] :81");
+  }
+  Serial.println("[HTTP] :80");
+}
+
+} // namespace
+
+// ============================================================
+//  setup / loop
+// ============================================================
 void setup() {
-  Serial.begin(115200);
-  delay(500);
-  Serial.println("\n[BOOT] Phase 1 firmware");
-  if (wsMutex == nullptr) {
-    wsMutex = xSemaphoreCreateRecursiveMutex();
-  }
+  Serial.begin(115200); delay(500);
+  Serial.println("\n[BOOT] RC Car");
+
+  wsLock    = xSemaphoreCreateRecursiveMutex();
+  frameLock = xSemaphoreCreateMutex();
+
   safeStop();
-  cameraReady = initCamera();
-  startCameraCaptureTask();
-  startVideoUploadTask();
+  camReady = initCamera();
+
+  if (camReady) {
+    xTaskCreatePinnedToCore(taskCamCapture,"cam",6144,nullptr,1,nullptr,0);
+    xTaskCreatePinnedToCore(taskVidUpload, "vid",8192,nullptr,1,nullptr,1);
+  }
+
   initActuators();
-  microphoneReady = initMicrophone();
-  speakerReady = initSpeaker();
-  playSpeakerBootTone();
-  configureWebSocket();
-  loadWifiCredentials();
-  loadRememberedWifi();
-  setConnectOnBoot(false);
-  startProvisioningAp();
-  startHttpServer();
+  micReady = initMic();
+  spkReady = initSpk();
+  bootTone();
+
+  loadConfig();
+  loadMemWifi();
+
+  startAP();
+  startHTTP();
 }
 
 void loop() {
-  if (restartScheduledAt != 0 && millis() >= restartScheduledAt) {
-    Serial.println("[SYS] restarting now");
-    delay(100);
-    ESP.restart();
-  }
+  // 브로커 모드 전환 예약 처리
+  if (transAt && millis()>=transAt) enterBrokerMode();
 
-  if (brokerModeTransitionAt != 0 && millis() >= brokerModeTransitionAt) {
-    enterBrokerMode();
-  }
+  manageWifi();
+  if (!httpReady) startHTTP();
+  manageWs();
+  wsPoll();
 
-  ensureWifiConnected();
-  if ((apMode || WiFi.isConnected()) && !serverStarted) {
-    startHttpServer();
-  }
-  ensureWebSocketConnected();
-  wsLoopSafe();
-  if (localAudioWsStarted) {
-    localAudioWs.loop();
-  }
-  if (serverStarted) {
-    cameraServer.handleClient();
-  }
-  sendPingIfNeeded();
-  uploadAudioChunkIfNeeded();
+  if (lwsReady)   localWs.loop();
+  if (httpReady)  httpSrv.handleClient();
 
-  unsigned long current = millis();
-  if (wsConnected && current - lastStatusAt >= STATUS_INTERVAL_MS) {
-    lastStatusAt = current;
-    publishStatus();
-  }
+  sendPing();
+  sendStatus();
+  sendAudio();
 
-  if (lastCommandAt > 0 && current - lastCommandAt > COMMAND_TIMEOUT_MS) {
-    safeStop();
-    lastCommandAt = 0;
-  }
+  // 명령 타임아웃 → 자동 정지
+  if (cmdAt>0 && millis()-cmdAt>CMD_TIMEOUT_MS) { safeStop(); cmdAt=0; }
 }
