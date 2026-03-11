@@ -87,6 +87,42 @@
   .rssi-val { color: var(--blue); }
   .res-val { color: #fef08a; }
   .hud-hidden { display: none !important; }
+  .ap-setup-only #stream-wrap { display: none; }
+  .ap-setup-only #control-panel { display: none; }
+  .ap-setup-only #btn-led,
+  .ap-setup-only #btn-snap,
+  .ap-setup-only #btn-talk,
+  .ap-setup-only #btn-rec { display: none; }
+  .ap-setup-only #toolbar { border-top: none; }
+  .ap-setup-only #btn-net {
+    flex: 1;
+    background: rgba(249, 115, 22, 0.16);
+    color: var(--orange);
+  }
+  #setup-summary {
+    display: none;
+    margin: 18px 14px 10px;
+    padding: 16px 18px;
+    border-radius: 14px;
+    background: linear-gradient(160deg, rgba(22,33,62,0.96), rgba(15,23,42,0.96));
+    border: 1px solid rgba(255,255,255,0.08);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .ap-setup-only #setup-summary { display: block; }
+  #setup-summary h2 {
+    font-family: "Orbitron", sans-serif;
+    font-size: 14px;
+    letter-spacing: 1px;
+    color: #fef08a;
+    margin-bottom: 10px;
+  }
+  #setup-summary p {
+    font-size: 12px;
+    color: rgba(255,255,255,0.72);
+    margin-bottom: 8px;
+  }
+  #setup-summary strong { color: #fff; }
 
   /* AP모드 배너 */
   #ap-banner {
@@ -271,6 +307,12 @@
 <div id="app">
   <div id="ap-banner" class="visible">⚡ AP 로컬 모드 — 192.168.4.1 직접 연결 중</div>
 
+  <section id="setup-summary">
+    <h2>설정 전용 AP 모드</h2>
+    <p><strong>이 모드에서는 스트리밍, 조종, 오디오를 제공하지 않습니다.</strong></p>
+    <p>하단의 <strong>NET</strong> 버튼을 눌러 Wi-Fi를 선택하고 저장하면 보드가 재부팅 없이 브로커 모드로 전환됩니다.</p>
+  </section>
+
   <div id="stream-wrap">
     <img id="stream" src="" alt="stream" crossorigin="anonymous">
     <canvas id="stream-canvas"></canvas>
@@ -314,7 +356,7 @@
     </h2>
     <div id="broker-hint">
       ✅ Wi-Fi 선택 후 <b>연결</b>을 누르면 브로커 모드로 전환됩니다.<br>
-      연결 성공 시 자동으로 리부팅됩니다.
+      저장 후 재부팅 없이 브로커 모드로 전환됩니다.
     </div>
     <div id="wifi-scan-list">
       <div style="color:rgba(255,255,255,0.3);font-size:12px;text-align:center;padding:12px">
@@ -384,6 +426,7 @@ let wsHudState = apModeActive ? "AP" : "OFF";
 let lastPingSentAt = 0;
 let lastPingRttMs = null;
 let lastFrameDrawAt = 0;
+let smoothedVideoAgeMs = 0;
 let hudTimer = 0;
 
 // AP모드 상태 표시
@@ -529,19 +572,30 @@ function formatAgeMs(ageMs) {
 function updateHudMetrics() {
   wsVal.textContent = wsHudState;
   rttVal.textContent = lastPingRttMs === null ? "--" : `${Math.round(lastPingRttMs)}ms`;
-  if (apModeActive) {
-    videoAgeVal.textContent = lastFrameDrawAt ? formatAgeMs(Date.now() - lastFrameDrawAt) : "--";
-    return;
-  }
   if (!lastFrameDrawAt) {
     videoAgeVal.textContent = "--";
     return;
   }
-  videoAgeVal.textContent = formatAgeMs(Date.now() - lastFrameDrawAt);
+
+  const rawAgeMs = Date.now() - lastFrameDrawAt;
+  if (rawAgeMs >= 3000) {
+    videoAgeVal.textContent = "LOST";
+    return;
+  }
+
+  if (smoothedVideoAgeMs <= 0 || rawAgeMs < smoothedVideoAgeMs) {
+    smoothedVideoAgeMs = rawAgeMs;
+  } else {
+    smoothedVideoAgeMs = (smoothedVideoAgeMs * 0.82) + (rawAgeMs * 0.18);
+  }
+
+  const quantizedAgeMs = Math.round(smoothedVideoAgeMs / 25) * 25;
+  videoAgeVal.textContent = formatAgeMs(quantizedAgeMs);
 }
 
 function markFrameDrawn() {
   lastFrameDrawAt = Date.now();
+  smoothedVideoAgeMs = 0;
   updateHudMetrics();
 }
 
@@ -557,6 +611,7 @@ function syncSelectedDevice(devices) {
     brokerQueuedFrame = null;
     brokerFrameBusy = false;
     lastFrameDrawAt = 0;
+    smoothedVideoAgeMs = 0;
   }
 }
 
@@ -1471,13 +1526,12 @@ window.addEventListener("pagehide", () => { talkEnd(); setCanvasVideoMode(false)
 // ============================================================
 if (isApOrLocal) {
   // AP / 로컬 STA 모드
+  document.body.classList.add("ap-setup-only");
   setWsHudState("AP");
-  connLabel.textContent = "AP 모드";
-  resLabel.textContent = DEFAULT_CAMERA_QUALITY;
-  ensureDefaultQuality();
-  startApVideoLoop();
+  connLabel.textContent = "SETUP";
+  resLabel.textContent = "SETUP";
   startApStatusPoll();
-  startApAudioWs();
+  setTimeout(openWifiPanel, 250);
 } else {
   // broker 모드
   apBanner.classList.remove("visible");

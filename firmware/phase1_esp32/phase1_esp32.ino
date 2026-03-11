@@ -41,6 +41,8 @@ constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
 constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
 constexpr unsigned long AP_TO_BROKER_TRANSITION_MS = 500;
+constexpr unsigned long BROKER_UPLOAD_GRACE_MS = 5000;
+constexpr unsigned long BROKER_AUDIO_START_DELAY_MS = 10000;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
@@ -73,6 +75,7 @@ unsigned long lastCommandAt = 0;
 unsigned long reconnectDelayMs = 1000;
 unsigned long nextReconnectAt = 0;
 unsigned long wsConnectStartedAt = 0;
+unsigned long wsConnectedAt = 0;
 unsigned long restartScheduledAt = 0;
 unsigned long brokerModeTransitionAt = 0;
 unsigned long lastVideoUploadAt = 0;
@@ -227,6 +230,7 @@ void handleWifiScan();
 void handleWifiConnect();
 void handleTalkAudio();
 void playSpeakerBootTone();
+void playSpeakerTransitionTone();
 void startCameraCaptureTask();
 void cameraCaptureTask(void* arg);
 void startVideoUploadTask();
@@ -526,6 +530,7 @@ void enterBrokerMode() {
   }
 
   Serial.println("[CFG] switching to broker mode");
+  playSpeakerTransitionTone();
   brokerModeTransitionAt = 0;
   setConnectOnBoot(false);
   safeStop();
@@ -734,11 +739,14 @@ void configureWebSocket() {
       case WStype_CONNECTED:
         wsConnected = true;
         wsConnectInFlight = false;
+        wsConnectedAt = millis();
         resetBrokerFailureCounters();
         reconnectDelayMs = 1000;
         Serial.println("[WS] connected");
         break;
       case WStype_DISCONNECTED:
+        wsConnected = false;
+        wsConnectInFlight = false;
         Serial.println("[WS] disconnected");
         safeStop();
         if (!brokerDisconnectLatched) {
@@ -925,7 +933,7 @@ void startHttpServer() {
   cameraServer.begin();
   serverStarted = true;
   cameraServerStarted = true;
-  if (!localAudioWsStarted) {
+  if (!apMode && !localAudioWsStarted) {
     localAudioWs.begin();
     localAudioWs.onEvent([](uint8_t clientNum, WStype_t type, uint8_t* payload, size_t length) {
       switch (type) {
@@ -981,6 +989,10 @@ void handleStatusJson() {
 
 void handleControlJson() {
   cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+  if (apMode) {
+    cameraServer.send(403, "application/json", "{\"ok\":false,\"reason\":\"ap_setup_only\"}");
+    return;
+  }
   StaticJsonDocument<512> doc;
   DeserializationError error = deserializeJson(doc, cameraServer.arg("plain"));
   if (error) {
@@ -1171,7 +1183,50 @@ void videoUploadTask(void* arg) {
   }
 }
 
+void playSpeakerTransitionTone() {
+  if (!speakerReady) {
+    return;
+  }
+
+  constexpr int16_t amplitude = 2600;
+  constexpr uint32_t toneHz[] = { 880, 1320 };
+  constexpr size_t toneCount = sizeof(toneHz) / sizeof(toneHz[0]);
+  constexpr size_t sampleCount = AUDIO_PLAYBACK_SAMPLE_RATE / 20;
+  constexpr size_t gapSamples = AUDIO_PLAYBACK_SAMPLE_RATE / 80;
+
+  for (size_t toneIndex = 0; toneIndex < toneCount; ++toneIndex) {
+    int16_t sample = amplitude;
+    uint32_t halfWaveSamples = AUDIO_PLAYBACK_SAMPLE_RATE / (toneHz[toneIndex] * 2);
+    if (halfWaveSamples == 0) {
+      halfWaveSamples = 1;
+    }
+
+    for (size_t i = 0; i < sampleCount; ++i) {
+      if ((i % halfWaveSamples) == 0) {
+        sample = -sample;
+      }
+      uint8_t frame[4] = {
+        static_cast<uint8_t>(sample & 0xff),
+        static_cast<uint8_t>((sample >> 8) & 0xff),
+        static_cast<uint8_t>(sample & 0xff),
+        static_cast<uint8_t>((sample >> 8) & 0xff)
+      };
+      speaker.write(frame, sizeof(frame));
+    }
+
+    for (size_t i = 0; i < gapSamples; ++i) {
+      uint8_t silentFrame[4] = { 0, 0, 0, 0 };
+      speaker.write(silentFrame, sizeof(silentFrame));
+    }
+  }
+}
+
 void handleJpeg() {
+  if (apMode) {
+    cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    cameraServer.send(410, "text/plain", "ap setup mode; video disabled");
+    return;
+  }
   std::unique_ptr<uint8_t[]> frameCopy;
   size_t frameLen = 0;
   if (!copyLatestJpegFrame(frameCopy, frameLen)) {
@@ -1196,6 +1251,10 @@ void handleStream() {
 }
 void handleTalkAudio() {
   cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
+  if (apMode) {
+    cameraServer.send(403, "application/json", "{\"ok\":false,\"reason\":\"ap_setup_only\"}");
+    return;
+  }
   if (!speakerReady) {
     cameraServer.send(503, "application/json", "{\"ok\":false,\"reason\":\"speaker_not_ready\"}");
     return;
@@ -1321,12 +1380,17 @@ void uploadVideoFrameIfNeeded() {
   }
 
   bool sent = wsSendBinary(frameCopy.get(), frameLen);
+  const bool inGracePeriod = (millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS;
 
   if (sent) {
     brokerVideoFailCount = 0;
     lastVideoUploadAt = current;
   } else {
     Serial.println("[CAM] upload frame failed");
+    if (inGracePeriod) {
+      brokerVideoFailCount = 0;
+      return;
+    }
     brokerVideoFailCount++;
     if (brokerVideoFailCount >= BROKER_RECOVERY_VIDEO_FAILS) {
       scheduleBrokerRecovery("video_upload_failed");
@@ -1479,6 +1543,9 @@ void uploadAudioChunkIfNeeded() {
   }
 
   unsigned long current = millis();
+  if (shouldSendBrokerAudio && (current - wsConnectedAt) < BROKER_AUDIO_START_DELAY_MS) {
+    return;
+  }
   if (current - lastAudioUploadAt < AUDIO_UPLOAD_INTERVAL_MS) {
     return;
   }
@@ -1520,9 +1587,10 @@ void uploadAudioChunkIfNeeded() {
     sent = wsSendText(payload);
     if (!sent) {
       Serial.println("[MIC] broker upload failed");
-      brokerAudioFailCount++;
-      if (brokerAudioFailCount >= BROKER_RECOVERY_AUDIO_FAILS) {
-        scheduleBrokerRecovery("audio_upload_failed");
+      if ((millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS) {
+        brokerAudioFailCount = 0;
+      } else {
+        brokerAudioFailCount++;
       }
     } else {
       brokerAudioFailCount = 0;
@@ -1561,6 +1629,10 @@ void connectWebSocket() {
 
 void ensureWifiConnected() {
   if (apMode) {
+    return;
+  }
+
+  if (restartScheduledAt != 0) {
     return;
   }
 
