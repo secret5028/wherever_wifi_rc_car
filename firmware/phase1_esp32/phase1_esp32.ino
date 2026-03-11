@@ -1,4 +1,4 @@
-﻿#include <Arduino.h>
+#include <Arduino.h>
 #include <ESP_I2S.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -43,6 +43,11 @@ constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
+constexpr uint8_t BROKER_RECOVERY_PING_FAILS = 2;
+constexpr uint8_t BROKER_RECOVERY_DISCONNECTS = 2;
+constexpr uint8_t BROKER_RECOVERY_WS_ERRORS = 2;
+constexpr uint8_t BROKER_RECOVERY_VIDEO_FAILS = 4;
+constexpr uint8_t BROKER_RECOVERY_AUDIO_FAILS = 6;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_PLAYBACK_SAMPLE_RATE = 16000;
@@ -83,6 +88,10 @@ bool localAudioWsStarted = false;
 bool cameraCaptureTaskStarted = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
+uint8_t brokerDisconnectCount = 0;
+uint8_t brokerWsErrorCount = 0;
+uint8_t brokerVideoFailCount = 0;
+uint8_t brokerAudioFailCount = 0;
 int lastThrottle = 0;
 int lastSteering = 0;
 uint32_t audioSequence = 0;
@@ -194,6 +203,8 @@ void startProvisioningAp();
 void startHttpServer();
 uint32_t readBatteryMilliVolts();
 uint8_t estimateBatteryPercent(uint32_t batteryMv);
+void resetBrokerFailureCounters();
+void scheduleBrokerRecovery(const char* reason);
 
 void handleRoot();
 void handleStatusJson();
@@ -355,9 +366,6 @@ void rememberWifiCredentials(const String& ssid, const String& password) {
   }
 
   String nextPassword = password;
-  if (nextPassword.length() == 0 && existingIndex >= 0) {
-    nextPassword = rememberedPasswords[existingIndex];
-  }
 
   if (existingIndex > 0) {
     for (int i = existingIndex; i > 0; --i) {
@@ -600,6 +608,31 @@ void scheduleRestart(const char* reason) {
   Serial.printf("[SYS] restart scheduled: %s\n", reason);
 }
 
+void resetBrokerFailureCounters() {
+  pingFailCount = 0;
+  brokerDisconnectCount = 0;
+  brokerWsErrorCount = 0;
+  brokerVideoFailCount = 0;
+  brokerAudioFailCount = 0;
+}
+
+void scheduleBrokerRecovery(const char* reason) {
+  if (restartScheduledAt != 0) {
+    return;
+  }
+
+  Serial.printf("[SYS] broker recovery: %s\n", reason);
+  safeStop();
+  resetBrokerFailureCounters();
+  wsConnected = false;
+  wsConnectInFlight = false;
+  wifiConnectInFlight = false;
+  nextReconnectAt = 0;
+  ws.disconnect();
+  WiFi.disconnect(true, true);
+  scheduleRestart(reason);
+}
+
 void configureWebSocket() {
   if (wsConfigured) {
     return;
@@ -610,13 +643,18 @@ void configureWebSocket() {
       case WStype_CONNECTED:
         wsConnected = true;
         wsConnectInFlight = false;
-        pingFailCount = 0;
+        resetBrokerFailureCounters();
         reconnectDelayMs = 1000;
         Serial.println("[WS] connected");
         break;
       case WStype_DISCONNECTED:
         Serial.println("[WS] disconnected");
         safeStop();
+        brokerDisconnectCount++;
+        if (brokerDisconnectCount >= BROKER_RECOVERY_DISCONNECTS) {
+          scheduleBrokerRecovery("ws_disconnected_repeated");
+          break;
+        }
         scheduleReconnect();
         break;
       case WStype_TEXT: {
@@ -670,6 +708,7 @@ void configureWebSocket() {
           Serial.println("[SNAP] requested");
         } else if (strcmp(messageType, "pong") == 0) {
           pingFailCount = 0;
+          brokerWsErrorCount = 0;
         } else if (strcmp(messageType, "hello") == 0) {
           Serial.println("[WS] broker hello");
         }
@@ -677,6 +716,10 @@ void configureWebSocket() {
       }
       case WStype_ERROR:
         Serial.println("[WS] error");
+        brokerWsErrorCount++;
+        if (brokerWsErrorCount >= BROKER_RECOVERY_WS_ERRORS) {
+          scheduleBrokerRecovery("ws_error_repeated");
+        }
         break;
       default:
         break;
@@ -882,14 +925,13 @@ void handleConfigSave() {
   if (ssid.length() == 0) {
     ssid = activeWifiSsid;
   }
+  const bool ssidChanged = ssid != activeWifiSsid;
   if (password.length() == 0) {
-    String rememberedPassword = getRememberedPassword(ssid);
-    if (rememberedPassword.length() > 0) {
-      password = rememberedPassword;
-    } else if (activeWifiPassword.length() > 0) {
-      password = activeWifiPassword;
-    } else if (strlen(WIFI_PASSWORD) > 0) {
-      password = WIFI_PASSWORD;
+    if (ssidChanged) {
+      String rememberedPassword = getRememberedPassword(ssid);
+      if (rememberedPassword.length() > 0) {
+        password = rememberedPassword;
+      }
     }
   }
   if (brokerHost.length() == 0) {
@@ -1125,6 +1167,7 @@ void handleWifiConnect() {
 
   String ssid     = String(doc["ssid"] | "");
   String password = String(doc["password"] | "");
+  bool secure = doc["secure"].isNull() ? true : static_cast<bool>(doc["secure"]);
   ssid.trim();
   password.trim();
 
@@ -1133,8 +1176,8 @@ void handleWifiConnect() {
     return;
   }
 
-  // 비번이 비어있으면 저장된 것 사용
-  if (password.length() == 0) {
+  // Open network should preserve an explicitly empty password.
+  if (secure && password.length() == 0) {
     String saved = getRememberedPassword(ssid);
     if (saved.length() > 0) {
       password = saved;
@@ -1171,9 +1214,14 @@ void uploadVideoFrameIfNeeded() {
   bool sent = ws.sendBIN(frameCopy.get(), frameLen);
 
   if (sent) {
+    brokerVideoFailCount = 0;
     lastVideoUploadAt = current;
   } else {
     Serial.println("[CAM] upload frame failed");
+    brokerVideoFailCount++;
+    if (brokerVideoFailCount >= BROKER_RECOVERY_VIDEO_FAILS) {
+      scheduleBrokerRecovery("video_upload_failed");
+    }
   }
 }
 
@@ -1362,6 +1410,12 @@ void uploadAudioChunkIfNeeded() {
     sent = ws.sendTXT(payload);
     if (!sent) {
       Serial.println("[MIC] broker upload failed");
+      brokerAudioFailCount++;
+      if (brokerAudioFailCount >= BROKER_RECOVERY_AUDIO_FAILS) {
+        scheduleBrokerRecovery("audio_upload_failed");
+      }
+    } else {
+      brokerAudioFailCount = 0;
     }
   }
   if (hasLocalAudioClients) {
@@ -1433,7 +1487,11 @@ void ensureWifiConnected() {
   wifiConnectInFlight = true;
   Serial.printf("[WIFI] connecting to %s\n", activeWifiSsid.c_str());
   WiFi.mode(WIFI_STA);
-  WiFi.begin(activeWifiSsid.c_str(), activeWifiPassword.c_str());
+  if (activeWifiPassword.length() == 0) {
+    WiFi.begin(activeWifiSsid.c_str());
+  } else {
+    WiFi.begin(activeWifiSsid.c_str(), activeWifiPassword.c_str());
+  }
 }
 
 void ensureWebSocketConnected() {
@@ -1486,7 +1544,9 @@ void sendPingIfNeeded() {
   if (!ok) {
     pingFailCount++;
     Serial.printf("[WS] ping send failed (%u)\n", pingFailCount);
-    if (pingFailCount >= MAX_PING_FAILS) {
+    if (pingFailCount >= BROKER_RECOVERY_PING_FAILS) {
+      scheduleBrokerRecovery("ping_send_failed");
+    } else if (pingFailCount >= MAX_PING_FAILS) {
       safeStop();
       ws.disconnect();
       scheduleReconnect();

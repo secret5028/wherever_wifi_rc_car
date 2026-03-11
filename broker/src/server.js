@@ -13,6 +13,13 @@ function sendJson(socket, payload) {
   }
 }
 
+function describeWsError(error) {
+  if (!error) {
+    return "unknown websocket error";
+  }
+  return error.code ? `${error.code}: ${error.message}` : (error.message || String(error));
+}
+
 function now() {
   return Date.now();
 }
@@ -293,6 +300,10 @@ deviceWss.on("connection", (ws, req) => {
     devices.delete(deviceId);
     broadcastToClients({ type: "device_offline", deviceId });
   });
+
+  ws.on("error", (error) => {
+    console.warn(`[device:${deviceId}] websocket error ${describeWsError(error)}`);
+  });
 });
 
 clientWss.on("connection", (ws) => {
@@ -392,6 +403,10 @@ clientWss.on("connection", (ws) => {
 
   ws.on("close", () => {
     clients.delete(clientId);
+  });
+
+  ws.on("error", (error) => {
+    console.warn(`[client:${clientId}] websocket error ${describeWsError(error)}`);
   });
 });
 

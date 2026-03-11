@@ -353,6 +353,8 @@ const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 
 let ws = null;
 let wsReady = false;
+const WS_PING_INTERVAL_MS = 10000;
+let wsPingTimer = 0;
 let driveMode = true;
 let resIdx = qualityList.indexOf(DEFAULT_CAMERA_QUALITY);
 if (resIdx < 0) resIdx = 0;
@@ -370,6 +372,7 @@ let apVideoPaused = false;
 let apAudioPaused = false;
 let apResumeVideoTimer = 0;
 let apResumeAudioTimer = 0;
+let selectedSsidSecure = true;
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
@@ -571,12 +574,32 @@ async function startApVideoLoop() {
 }
 
 // broker WebSocket 연결
+function stopWsHeartbeat() {
+  if (wsPingTimer) {
+    clearInterval(wsPingTimer);
+    wsPingTimer = 0;
+  }
+}
+
+function startWsHeartbeat() {
+  stopWsHeartbeat();
+  wsPingTimer = setInterval(() => {
+    if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "ping" }));
+  }, WS_PING_INTERVAL_MS);
+}
+
 function connectWS() {
   if (!brokerUrl) return;
   ws = new WebSocket(brokerUrl);
-  ws.onopen = () => { wsReady = true; connLabel.textContent = "broker on"; };
+  ws.onopen = () => {
+    wsReady = true;
+    connLabel.textContent = "broker on";
+    startWsHeartbeat();
+  };
   ws.onclose = () => {
     wsReady = false; connLabel.textContent = "reconnecting";
+    stopWsHeartbeat();
     setStreamUrl(""); setTimeout(connectWS, 1500);
   };
   ws.onerror = () => { connLabel.textContent = "socket error"; };
@@ -615,6 +638,9 @@ function handleBrokerMessage(message) {
     rssiVal.textContent = sig !== null ? `${sig}%` : "--%";
     if (message.remoteVideoUrl) setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
     else if (message.localIp && message.streamPath) setStreamUrl(`http://${message.localIp}${message.streamPath}`);
+    return;
+  }
+  if (message.type === "pong" || message.type === "broker_status") {
     return;
   }
   if (message.type === "audio" && message.deviceId === deviceId) {
@@ -753,6 +779,7 @@ function renderScanList() {
 
 function selectSsid(ssid, secure, hasSaved) {
   selectedSsid = ssid;
+  selectedSsidSecure = secure;
   // 기존 selected 해제
   document.querySelectorAll(".wifi-item").forEach(el => el.classList.remove("selected"));
   event.currentTarget.classList.add("selected");
@@ -800,7 +827,8 @@ async function doWifiConnect() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ssid: selectedSsid,
-        password: password
+        password: password,
+        secure: selectedSsidSecure
       })
     });
     const data = await res.json();
