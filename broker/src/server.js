@@ -172,6 +172,18 @@ function broadcastToClients(payload) {
   }
 }
 
+function notifyDevicesClientState() {
+  const payload = {
+    type: "client_state",
+    clients: clients.size,
+    audioEnabled: clients.size > 0,
+    ts: now()
+  };
+  for (const deviceEntry of devices.values()) {
+    sendJson(deviceEntry.ws, payload);
+  }
+}
+
 function encodeVideoFrameMessage(deviceId, frameBuffer) {
   const deviceIdBuffer = Buffer.from(deviceId, "utf8");
   const output = Buffer.allocUnsafe(1 + 2 + deviceIdBuffer.length + frameBuffer.length);
@@ -261,6 +273,7 @@ function closeStaleConnections() {
     if (current - entry.lastSeenAt > config.staleClientMs) {
       entry.ws.close(4000, "client timeout");
       clients.delete(id);
+      notifyDevicesClientState();
     }
   }
 }
@@ -272,6 +285,7 @@ deviceWss.on("connection", (ws, req) => {
 
   devices.set(deviceId, entry);
   sendJson(ws, { type: "hello", role: "broker", heartbeatMs: config.heartbeatMs });
+  sendJson(ws, { type: "client_state", clients: clients.size, audioEnabled: clients.size > 0, ts: now() });
   broadcastToClients({ type: "device_online", deviceId });
 
   ws.on("message", (raw, isBinary) => {
@@ -336,6 +350,7 @@ clientWss.on("connection", (ws) => {
   const clientId = `client-${Math.random().toString(16).slice(2, 8)}`;
   const entry = { ws, clientId, lastSeenAt: now() };
   clients.set(clientId, entry);
+  notifyDevicesClientState();
 
   sendJson(ws, {
     type: "welcome",
@@ -435,6 +450,7 @@ clientWss.on("connection", (ws) => {
 
   ws.on("close", () => {
     clients.delete(clientId);
+    notifyDevicesClientState();
   });
 
   ws.on("error", (error) => {

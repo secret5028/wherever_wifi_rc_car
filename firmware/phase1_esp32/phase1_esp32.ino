@@ -44,7 +44,8 @@ constexpr unsigned long AP_TO_BROKER_TRANSITION_MS = 500;
 constexpr unsigned long BROKER_UPLOAD_GRACE_MS = 5000;
 constexpr unsigned long BROKER_AUDIO_START_DELAY_MS = 10000;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
-constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
+constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 80;
+constexpr unsigned long BROKER_AUDIO_FAIL_COOLDOWN_MS = 10000;
 constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
@@ -80,6 +81,7 @@ unsigned long restartScheduledAt = 0;
 unsigned long brokerModeTransitionAt = 0;
 unsigned long lastVideoUploadAt = 0;
 unsigned long lastAudioUploadAt = 0;
+unsigned long brokerAudioMutedUntil = 0;
 
 bool wsConnected = false;
 bool wifiConnectInFlight = false;
@@ -99,12 +101,14 @@ bool localAudioWsStarted = false;
 bool cameraCaptureTaskStarted = false;
 bool videoUploadTaskStarted = false;
 bool brokerDisconnectLatched = false;
+bool brokerClientPresent = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 uint8_t brokerDisconnectCount = 0;
 uint8_t brokerWsErrorCount = 0;
 uint8_t brokerVideoFailCount = 0;
 uint8_t brokerAudioFailCount = 0;
+uint16_t brokerClientCount = 0;
 int lastThrottle = 0;
 int lastSteering = 0;
 uint32_t audioSequence = 0;
@@ -231,6 +235,7 @@ void handleWifiConnect();
 void handleTalkAudio();
 void playSpeakerBootTone();
 void playSpeakerTransitionTone();
+void drainMicrophoneInput();
 void startCameraCaptureTask();
 void cameraCaptureTask(void* arg);
 void startVideoUploadTask();
@@ -521,6 +526,9 @@ void startProvisioningAp() {
   wifiConnectInFlight = false;
   wsConnectInFlight = false;
   wsConnected = false;
+  brokerClientPresent = false;
+  brokerClientCount = 0;
+  drainMicrophoneInput();
   Serial.printf("[AP] started ssid=%s ip=%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
 }
 
@@ -538,9 +546,12 @@ void enterBrokerMode() {
   wsConnected = false;
   wsConnectInFlight = false;
   wifiConnectInFlight = false;
+  brokerClientPresent = false;
+  brokerClientCount = 0;
   nextReconnectAt = 0;
   lastWifiAttemptAt = 0;
   wsDisconnectSafe();
+  drainMicrophoneInput();
   WiFi.softAPdisconnect(true);
   delay(100);
   WiFi.mode(WIFI_STA);
@@ -712,7 +723,7 @@ void resetBrokerFailureCounters() {
 }
 
 void scheduleBrokerRecovery(const char* reason) {
-  if (restartScheduledAt != 0) {
+  if (restartScheduledAt != 0 || apMode) {
     return;
   }
 
@@ -723,10 +734,13 @@ void scheduleBrokerRecovery(const char* reason) {
   wsConnected = false;
   wsConnectInFlight = false;
   wifiConnectInFlight = false;
+  brokerClientPresent = false;
+  brokerClientCount = 0;
   nextReconnectAt = 0;
   wsDisconnectSafe();
+  brokerAudioMutedUntil = millis() + BROKER_AUDIO_FAIL_COOLDOWN_MS;
   WiFi.disconnect(true, true);
-  scheduleRestart(reason);
+  startProvisioningAp();
 }
 
 void configureWebSocket() {
@@ -740,6 +754,9 @@ void configureWebSocket() {
         wsConnected = true;
         wsConnectInFlight = false;
         wsConnectedAt = millis();
+        brokerClientPresent = false;
+        brokerClientCount = 0;
+        drainMicrophoneInput();
         resetBrokerFailureCounters();
         reconnectDelayMs = 1000;
         Serial.println("[WS] connected");
@@ -747,15 +764,13 @@ void configureWebSocket() {
       case WStype_DISCONNECTED:
         wsConnected = false;
         wsConnectInFlight = false;
+        brokerClientPresent = false;
+        brokerClientCount = 0;
         Serial.println("[WS] disconnected");
         safeStop();
         if (!brokerDisconnectLatched) {
           brokerDisconnectLatched = true;
           brokerDisconnectCount++;
-          if (brokerDisconnectCount >= BROKER_RECOVERY_DISCONNECTS) {
-            scheduleBrokerRecovery("ws_disconnected_repeated");
-            break;
-          }
         }
         scheduleReconnect();
         break;
@@ -813,6 +828,17 @@ void configureWebSocket() {
           brokerWsErrorCount = 0;
         } else if (strcmp(messageType, "hello") == 0) {
           Serial.println("[WS] broker hello");
+        } else if (strcmp(messageType, "client_state") == 0) {
+          brokerClientCount = static_cast<uint16_t>(doc["clients"] | 0);
+          brokerClientPresent = brokerClientCount > 0;
+          if (brokerClientPresent) {
+            wsConnectedAt = millis();
+            brokerAudioMutedUntil = 0;
+            Serial.printf("[WS] clients online=%u, broker audio enabled\n", brokerClientCount);
+          } else {
+            drainMicrophoneInput();
+            Serial.println("[WS] no clients, broker audio paused");
+          }
         }
         break;
       }
@@ -1535,14 +1561,33 @@ void playSpeakerSamples(const int16_t* samples, size_t sampleCount) {
   speaker.write(speakerFrameBuffer, sampleCount * 4);
 }
 
-void uploadAudioChunkIfNeeded() {
-  const bool hasLocalAudioClients = localAudioWsStarted && localAudioWs.connectedClients() > 0;
-  const bool shouldSendBrokerAudio = wsConnected;
-  if (!microphoneReady || talkEnabled || (!shouldSendBrokerAudio && !hasLocalAudioClients)) {
+void drainMicrophoneInput() {
+  if (!microphoneReady) {
     return;
   }
 
+  uint8_t drainedBlocks = 0;
+  while (drainedBlocks < 2 && microphone.available() >= static_cast<int>(AUDIO_CAPTURE_BYTES)) {
+    size_t bytesRead = microphone.readBytes(reinterpret_cast<char*>(audioCaptureBuffer), AUDIO_CAPTURE_BYTES);
+    if (bytesRead != AUDIO_CAPTURE_BYTES) {
+      break;
+    }
+    drainedBlocks++;
+  }
+}
+
+void uploadAudioChunkIfNeeded() {
   unsigned long current = millis();
+  const bool hasLocalAudioClients = localAudioWsStarted && localAudioWs.connectedClients() > 0;
+  const bool brokerAudioCoolingDown = current < brokerAudioMutedUntil;
+  const bool shouldSendBrokerAudio = wsConnected && brokerClientPresent && !brokerAudioCoolingDown;
+  if (!microphoneReady || talkEnabled || (!shouldSendBrokerAudio && !hasLocalAudioClients)) {
+    if (!shouldSendBrokerAudio && !hasLocalAudioClients) {
+      drainMicrophoneInput();
+    }
+    return;
+  }
+
   if (shouldSendBrokerAudio && (current - wsConnectedAt) < BROKER_AUDIO_START_DELAY_MS) {
     return;
   }
@@ -1591,6 +1636,12 @@ void uploadAudioChunkIfNeeded() {
         brokerAudioFailCount = 0;
       } else {
         brokerAudioFailCount++;
+        if (brokerAudioFailCount >= BROKER_RECOVERY_AUDIO_FAILS) {
+          brokerAudioFailCount = 0;
+          brokerAudioMutedUntil = millis() + BROKER_AUDIO_FAIL_COOLDOWN_MS;
+          drainMicrophoneInput();
+          Serial.println("[MIC] broker audio cooldown");
+        }
       }
     } else {
       brokerAudioFailCount = 0;
