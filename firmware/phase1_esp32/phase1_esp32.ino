@@ -300,7 +300,7 @@ void wsDisconnectSafe() {
 }
 
 void wsLoopSafe() {
-  if (!lockWs(pdMS_TO_TICKS(5))) {
+  if (!lockWs(pdMS_TO_TICKS(20))) {
     return;
   }
   ws.loop();
@@ -548,8 +548,10 @@ void enterBrokerMode() {
   wifiConnectInFlight = false;
   brokerClientPresent = false;
   brokerClientCount = 0;
+  wsConnectedAt = 0;
   nextReconnectAt = 0;
   lastWifiAttemptAt = 0;
+  lastAudioUploadAt = 0;
   wsDisconnectSafe();
   drainMicrophoneInput();
   WiFi.softAPdisconnect(true);
@@ -699,6 +701,7 @@ void applyCameraQuality(const char* quality) {
 void scheduleReconnect() {
   wsConnected = false;
   wsConnectInFlight = false;
+  wsConnectedAt = 0;
   nextReconnectAt = millis() + reconnectDelayMs;
   reconnectDelayMs = min(reconnectDelayMs * 2UL, 30000UL);
 }
@@ -764,6 +767,7 @@ void configureWebSocket() {
       case WStype_DISCONNECTED:
         wsConnected = false;
         wsConnectInFlight = false;
+        wsConnectedAt = 0;
         brokerClientPresent = false;
         brokerClientCount = 0;
         Serial.println("[WS] disconnected");
@@ -1393,6 +1397,9 @@ void uploadVideoFrameIfNeeded() {
     return;
   }
 
+  const bool inGracePeriod = (wsConnectedAt == 0) ||
+    ((millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS);
+
   unsigned long current = millis();
   if (current - lastVideoUploadAt < VIDEO_UPLOAD_INTERVAL_MS) {
     return;
@@ -1406,17 +1413,16 @@ void uploadVideoFrameIfNeeded() {
   }
 
   bool sent = wsSendBinary(frameCopy.get(), frameLen);
-  const bool inGracePeriod = (millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS;
 
   if (sent) {
     brokerVideoFailCount = 0;
     lastVideoUploadAt = current;
   } else {
-    Serial.println("[CAM] upload frame failed");
     if (inGracePeriod) {
       brokerVideoFailCount = 0;
       return;
     }
+    Serial.println("[CAM] upload frame failed");
     brokerVideoFailCount++;
     if (brokerVideoFailCount >= BROKER_RECOVERY_VIDEO_FAILS) {
       scheduleBrokerRecovery("video_upload_failed");
@@ -1588,8 +1594,10 @@ void uploadAudioChunkIfNeeded() {
     return;
   }
 
-  if (shouldSendBrokerAudio && (current - wsConnectedAt) < BROKER_AUDIO_START_DELAY_MS) {
-    return;
+  if (shouldSendBrokerAudio) {
+    if (wsConnectedAt == 0 || (current - wsConnectedAt) < BROKER_AUDIO_START_DELAY_MS) {
+      return;
+    }
   }
   if (current - lastAudioUploadAt < AUDIO_UPLOAD_INTERVAL_MS) {
     return;
@@ -1632,7 +1640,7 @@ void uploadAudioChunkIfNeeded() {
     sent = wsSendText(payload);
     if (!sent) {
       Serial.println("[MIC] broker upload failed");
-      if ((millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS) {
+      if (wsConnectedAt == 0 || (millis() - wsConnectedAt) < BROKER_UPLOAD_GRACE_MS) {
         brokerAudioFailCount = 0;
       } else {
         brokerAudioFailCount++;
