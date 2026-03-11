@@ -28,7 +28,9 @@ I2SClass speaker;
 Preferences preferences;
 Servo steeringServo;
 SemaphoreHandle_t latestFrameMutex = nullptr;
+SemaphoreHandle_t wsMutex = nullptr;
 TaskHandle_t cameraCaptureTaskHandle = nullptr;
+TaskHandle_t videoUploadTaskHandle = nullptr;
 
 constexpr unsigned long WIFI_RETRY_MS = 5000;
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -38,6 +40,7 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
 constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
+constexpr unsigned long AP_TO_BROKER_TRANSITION_MS = 500;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
@@ -71,6 +74,7 @@ unsigned long reconnectDelayMs = 1000;
 unsigned long nextReconnectAt = 0;
 unsigned long wsConnectStartedAt = 0;
 unsigned long restartScheduledAt = 0;
+unsigned long brokerModeTransitionAt = 0;
 unsigned long lastVideoUploadAt = 0;
 unsigned long lastAudioUploadAt = 0;
 
@@ -90,6 +94,7 @@ bool serverStarted = false;
 bool hasStoredWifi = false;
 bool localAudioWsStarted = false;
 bool cameraCaptureTaskStarted = false;
+bool videoUploadTaskStarted = false;
 bool brokerDisconnectLatched = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
@@ -205,6 +210,7 @@ void rememberWifiCredentials(const String& ssid, const String& password);
 String getRememberedPassword(const String& ssid);
 void setConnectOnBoot(bool enabled);
 void startProvisioningAp();
+void enterBrokerMode();
 void startHttpServer();
 uint32_t readBatteryMilliVolts();
 uint8_t estimateBatteryPercent(uint32_t batteryMv);
@@ -223,10 +229,19 @@ void handleTalkAudio();
 void playSpeakerBootTone();
 void startCameraCaptureTask();
 void cameraCaptureTask(void* arg);
+void startVideoUploadTask();
+void videoUploadTask(void* arg);
+void uploadVideoFrameIfNeeded();
 bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen);
 size_t decodeBase64Payload(const char* encoded, uint8_t* output, size_t outputSize);
 size_t decodeAdpcmBlock(const uint8_t* input, size_t inputLen, int16_t* output, size_t maxSamples);
 void playSpeakerSamples(const int16_t* samples, size_t sampleCount);
+bool lockWs(TickType_t timeoutTicks = pdMS_TO_TICKS(100));
+void unlockWs();
+bool wsSendText(String& payload);
+bool wsSendBinary(const uint8_t* payload, size_t length);
+void wsDisconnectSafe();
+void wsLoopSafe();
 
 void safeStop() {
   lastThrottle = 0;
@@ -234,6 +249,53 @@ void safeStop() {
   writeMotorOutput(0);
   writeSteeringOutput(0);
   Serial.println("[SAFE] stop");
+}
+
+bool lockWs(TickType_t timeoutTicks) {
+  if (wsMutex == nullptr) {
+    return false;
+  }
+  return xSemaphoreTakeRecursive(wsMutex, timeoutTicks) == pdTRUE;
+}
+
+void unlockWs() {
+  if (wsMutex != nullptr) {
+    xSemaphoreGiveRecursive(wsMutex);
+  }
+}
+
+bool wsSendText(String& payload) {
+  if (!lockWs()) {
+    return false;
+  }
+  bool sent = ws.sendTXT(payload);
+  unlockWs();
+  return sent;
+}
+
+bool wsSendBinary(const uint8_t* payload, size_t length) {
+  if (!lockWs()) {
+    return false;
+  }
+  bool sent = ws.sendBIN(payload, length);
+  unlockWs();
+  return sent;
+}
+
+void wsDisconnectSafe() {
+  if (!lockWs()) {
+    return;
+  }
+  ws.disconnect();
+  unlockWs();
+}
+
+void wsLoopSafe() {
+  if (!lockWs(pdMS_TO_TICKS(5))) {
+    return;
+  }
+  ws.loop();
+  unlockWs();
 }
 
 void playSpeakerBootTone() {
@@ -446,7 +508,7 @@ void startProvisioningAp() {
   }
 
   safeStop();
-  ws.disconnect();
+  wsDisconnectSafe();
   WiFi.disconnect(true, true);
   delay(100);
   WiFi.mode(WIFI_AP);
@@ -456,6 +518,28 @@ void startProvisioningAp() {
   wsConnectInFlight = false;
   wsConnected = false;
   Serial.printf("[AP] started ssid=%s ip=%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+}
+
+void enterBrokerMode() {
+  if (!apMode) {
+    return;
+  }
+
+  Serial.println("[CFG] switching to broker mode");
+  brokerModeTransitionAt = 0;
+  setConnectOnBoot(false);
+  safeStop();
+  resetBrokerFailureCounters();
+  wsConnected = false;
+  wsConnectInFlight = false;
+  wifiConnectInFlight = false;
+  nextReconnectAt = 0;
+  lastWifiAttemptAt = 0;
+  wsDisconnectSafe();
+  WiFi.softAPdisconnect(true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  apMode = false;
 }
 
 uint32_t readBatteryMilliVolts() {
@@ -495,7 +579,7 @@ void publishStatus() {
 
   String payload;
   serializeJson(doc, payload);
-  ws.sendTXT(payload);
+  wsSendText(payload);
 }
 
 void applyControl(int throttle, int steering) {
@@ -630,12 +714,12 @@ void scheduleBrokerRecovery(const char* reason) {
   Serial.printf("[SYS] broker recovery: %s\n", reason);
   safeStop();
   resetBrokerFailureCounters();
-  setConnectOnBoot(true);
+  setConnectOnBoot(false);
   wsConnected = false;
   wsConnectInFlight = false;
   wifiConnectInFlight = false;
   nextReconnectAt = 0;
-  ws.disconnect();
+  wsDisconnectSafe();
   WiFi.disconnect(true, true);
   scheduleRestart(reason);
 }
@@ -965,10 +1049,10 @@ void handleConfigSave() {
   }
 
   saveConfig(ssid, password, brokerHost, brokerPort, deviceId);
-  setConnectOnBoot(true);
-  cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Connecting after reboot...</p></body></html>");
-  Serial.println("[CFG] connect + reboot scheduled");
-  restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
+  setConnectOnBoot(false);
+  cameraServer.send(200, "text/html", "<!doctype html><html><body><h1>Saved</h1><p>Switching to broker mode...</p></body></html>");
+  Serial.println("[CFG] broker transition scheduled");
+  brokerModeTransitionAt = millis() + AP_TO_BROKER_TRANSITION_MS;
 }
 
 void startCameraCaptureTask() {
@@ -1048,6 +1132,45 @@ bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen
   return frameLen > 0;
 }
 
+void startVideoUploadTask() {
+  if (!cameraReady || videoUploadTaskStarted) {
+    return;
+  }
+
+  if (wsMutex == nullptr) {
+    wsMutex = xSemaphoreCreateRecursiveMutex();
+    if (wsMutex == nullptr) {
+      Serial.println("[WS] failed to create mutex");
+      return;
+    }
+  }
+
+  BaseType_t rc = xTaskCreatePinnedToCore(
+    videoUploadTask, "video_upload", 6144, nullptr, 1, &videoUploadTaskHandle, 1
+  );
+  if (rc != pdPASS) {
+    Serial.println("[CAM] video upload task start failed");
+    return;
+  }
+
+  videoUploadTaskStarted = true;
+  Serial.println("[CAM] video upload task started");
+}
+
+void videoUploadTask(void* arg) {
+  (void)arg;
+
+  for (;;) {
+    if (restartScheduledAt != 0 || !cameraReady || !wsConnected || apMode || WiFi.status() != WL_CONNECTED) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+
+    uploadVideoFrameIfNeeded();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
 void handleJpeg() {
   std::unique_ptr<uint8_t[]> frameCopy;
   size_t frameLen = 0;
@@ -1068,32 +1191,8 @@ void handleJpeg() {
 }
 
 void handleStream() {
-  WiFiClient client = cameraServer.client();
-  client.setTimeout(5);
-
-  cameraServer.sendContent("HTTP/1.1 200 OK\r\n");
-  cameraServer.sendContent("Content-Type: multipart/x-mixed-replace; boundary=frame\r\n");
-  cameraServer.sendContent("Cache-Control: no-cache\r\n");
-  cameraServer.sendContent("Connection: close\r\n\r\n");
-
-  while (client.connected()) {
-    std::unique_ptr<uint8_t[]> frameCopy;
-    size_t frameLen = 0;
-    if (!copyLatestJpegFrame(frameCopy, frameLen)) {
-      delay(40);
-      continue;
-    }
-
-    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", static_cast<unsigned>(frameLen));
-    client.write(frameCopy.get(), frameLen);
-    client.print("\r\n");
-
-    if (!client.connected()) {
-      break;
-    }
-
-    delay(30);
-  }
+  cameraServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  cameraServer.send(410, "text/plain", "stream disabled; use /jpg");
 }
 void handleTalkAudio() {
   cameraServer.sendHeader("Access-Control-Allow-Origin", "*");
@@ -1196,11 +1295,11 @@ void handleWifiConnect() {
 
   // broker 정보는 기존 것 유지
   saveConfig(ssid, password, activeBrokerHost, activeBrokerPort, activeDeviceId);
-  setConnectOnBoot(true);
+  setConnectOnBoot(false);
 
   cameraServer.send(200, "application/json", "{\"ok\":true}");
-  Serial.printf("[CFG] wifi-connect ssid=%s -> reboot\n", ssid.c_str());
-  restartScheduledAt = millis() + AP_AUTO_REBOOT_MS;
+  Serial.printf("[CFG] wifi-connect ssid=%s -> broker transition\n", ssid.c_str());
+  brokerModeTransitionAt = millis() + AP_TO_BROKER_TRANSITION_MS;
 }
 
 
@@ -1221,7 +1320,7 @@ void uploadVideoFrameIfNeeded() {
     return;
   }
 
-  bool sent = ws.sendBIN(frameCopy.get(), frameLen);
+  bool sent = wsSendBinary(frameCopy.get(), frameLen);
 
   if (sent) {
     brokerVideoFailCount = 0;
@@ -1418,7 +1517,7 @@ void uploadAudioChunkIfNeeded() {
   serializeJson(doc, payload);
   bool sent = false;
   if (shouldSendBrokerAudio) {
-    sent = ws.sendTXT(payload);
+    sent = wsSendText(payload);
     if (!sent) {
       Serial.println("[MIC] broker upload failed");
       brokerAudioFailCount++;
@@ -1450,7 +1549,12 @@ void connectWebSocket() {
     activeDeviceId = DEFAULT_DEVICE_ID;
   }
   Serial.printf("[WS] target=%s:%u deviceId=%s\n", activeBrokerHost.c_str(), activeBrokerPort, activeDeviceId.c_str());
+  if (!lockWs()) {
+    Serial.println("[WS] mutex busy during begin");
+    return;
+  }
   ws.begin(activeBrokerHost.c_str(), activeBrokerPort, String("/device?deviceId=") + activeDeviceId);
+  unlockWs();
   wsConnectStartedAt = millis();
   wsConnectInFlight = true;
 }
@@ -1520,7 +1624,7 @@ void ensureWebSocketConnected() {
     if (millis() - wsConnectStartedAt >= WS_CONNECT_TIMEOUT_MS) {
       Serial.println("[WS] connect timeout");
       safeStop();
-      ws.disconnect();
+      wsDisconnectSafe();
       scheduleReconnect();
     }
     return;
@@ -1549,7 +1653,7 @@ void sendPingIfNeeded() {
 
   String payload;
   serializeJson(doc, payload);
-  bool ok = ws.sendTXT(payload);
+  bool ok = wsSendText(payload);
   lastPingAt = current;
 
   if (!ok) {
@@ -1559,7 +1663,7 @@ void sendPingIfNeeded() {
       scheduleBrokerRecovery("ping_send_failed");
     } else if (pingFailCount >= MAX_PING_FAILS) {
       safeStop();
-      ws.disconnect();
+      wsDisconnectSafe();
       scheduleReconnect();
     }
   }
@@ -1569,9 +1673,13 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n[BOOT] Phase 1 firmware");
+  if (wsMutex == nullptr) {
+    wsMutex = xSemaphoreCreateRecursiveMutex();
+  }
   safeStop();
   cameraReady = initCamera();
   startCameraCaptureTask();
+  startVideoUploadTask();
   initActuators();
   microphoneReady = initMicrophone();
   speakerReady = initSpeaker();
@@ -1579,13 +1687,9 @@ void setup() {
   configureWebSocket();
   loadWifiCredentials();
   loadRememberedWifi();
-  if (connectOnBoot && hasStoredWifi) {
-    setConnectOnBoot(false);
-    ensureWifiConnected();
-  } else {
-    startProvisioningAp();
-    startHttpServer();
-  }
+  setConnectOnBoot(false);
+  startProvisioningAp();
+  startHttpServer();
 }
 
 void loop() {
@@ -1595,12 +1699,16 @@ void loop() {
     ESP.restart();
   }
 
+  if (brokerModeTransitionAt != 0 && millis() >= brokerModeTransitionAt) {
+    enterBrokerMode();
+  }
+
   ensureWifiConnected();
   if ((apMode || WiFi.isConnected()) && !serverStarted) {
     startHttpServer();
   }
   ensureWebSocketConnected();
-  ws.loop();
+  wsLoopSafe();
   if (localAudioWsStarted) {
     localAudioWs.loop();
   }
@@ -1608,7 +1716,6 @@ void loop() {
     cameraServer.handleClient();
   }
   sendPingIfNeeded();
-  uploadVideoFrameIfNeeded();
   uploadAudioChunkIfNeeded();
 
   unsigned long current = millis();

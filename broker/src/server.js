@@ -234,6 +234,7 @@ function forwardClientCommand(ws, message, payload) {
 function forwardClientAudio(ws, message, payload) {
   const deviceEntry = resolveTargetDevice(message);
   if (!deviceEntry) {
+    sendJson(ws, { type: "error", reason: "no_device_connected" });
     return false;
   }
 

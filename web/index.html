@@ -280,6 +280,9 @@
         <span>BAT : <span class="bat-val" id="bat-val">0%</span></span>
         <span>SIG : <span class="rssi-val" id="rssi-val">100%</span></span>
         <span class="res-val" id="res-label">QVGA</span>
+        <span>WS : <span id="ws-val">--</span></span>
+        <span>RTT : <span id="rtt-val">--</span></span>
+        <span>VID : <span id="video-age-val">--</span></span>
         <span class="hud-hidden" id="conn-label">connecting</span>
       </div>
     </div>
@@ -349,6 +352,7 @@ const defaultDeviceId = "rc-car-01";
 const DEFAULT_CAMERA_QUALITY = "QVGA";
 const queryDeviceId = new URLSearchParams(location.search).get("deviceId");
 let deviceId = (queryDeviceId && queryDeviceId.trim()) || defaultDeviceId;
+const pinnedDeviceId = Boolean(queryDeviceId && queryDeviceId.trim());
 const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 
 let ws = null;
@@ -376,6 +380,11 @@ let selectedSsidSecure = true;
 let brokerCanvasActive = false;
 let brokerFrameBusy = false;
 let brokerQueuedFrame = null;
+let wsHudState = apModeActive ? "AP" : "OFF";
+let lastPingSentAt = 0;
+let lastPingRttMs = null;
+let lastFrameDrawAt = 0;
+let hudTimer = 0;
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
@@ -389,6 +398,9 @@ const connLabel = document.getElementById("conn-label");
 const batVal = document.getElementById("bat-val");
 const rssiVal = document.getElementById("rssi-val");
 const resLabel = document.getElementById("res-label");
+const wsVal = document.getElementById("ws-val");
+const rttVal = document.getElementById("rtt-val");
+const videoAgeVal = document.getElementById("video-age-val");
 const modeLabel = document.getElementById("mode-label");
 const btnLed = document.getElementById("btn-led");
 const btnNet = document.getElementById("btn-net");
@@ -509,6 +521,45 @@ function signalPercentFromRssi(rssi) {
   return Math.max(0, Math.min(100, Math.round(((rssi + 100) / 50) * 100)));
 }
 
+function formatAgeMs(ageMs) {
+  if (typeof ageMs !== "number" || !Number.isFinite(ageMs) || ageMs < 0) return "--";
+  return `${Math.round(ageMs)}ms`;
+}
+
+function updateHudMetrics() {
+  wsVal.textContent = wsHudState;
+  rttVal.textContent = lastPingRttMs === null ? "--" : `${Math.round(lastPingRttMs)}ms`;
+  if (apModeActive) {
+    videoAgeVal.textContent = lastFrameDrawAt ? formatAgeMs(Date.now() - lastFrameDrawAt) : "--";
+    return;
+  }
+  if (!lastFrameDrawAt) {
+    videoAgeVal.textContent = "--";
+    return;
+  }
+  videoAgeVal.textContent = formatAgeMs(Date.now() - lastFrameDrawAt);
+}
+
+function markFrameDrawn() {
+  lastFrameDrawAt = Date.now();
+  updateHudMetrics();
+}
+
+function setWsHudState(nextState) {
+  wsHudState = nextState;
+  updateHudMetrics();
+}
+
+function syncSelectedDevice(devices) {
+  if (!Array.isArray(devices) || devices.length === 0 || pinnedDeviceId) return;
+  if (!devices.includes(deviceId)) {
+    deviceId = devices[0];
+    brokerQueuedFrame = null;
+    brokerFrameBusy = false;
+    lastFrameDrawAt = 0;
+  }
+}
+
 function requestQuality(quality) {
   const nextIdx = qualityList.indexOf(quality);
   if (nextIdx >= 0) { resIdx = nextIdx; resLabel.textContent = quality; }
@@ -556,6 +607,7 @@ async function drawApFrame(blob) {
   }
   streamCanvasCtx.drawImage(bitmap, 0, 0, streamCanvas.width, streamCanvas.height);
   bitmap.close();
+  markFrameDrawn();
   return true;
 }
 
@@ -597,26 +649,30 @@ function startWsHeartbeat() {
   stopWsHeartbeat();
   wsPingTimer = setInterval(() => {
     if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) return;
+    lastPingSentAt = performance.now();
     ws.send(JSON.stringify({ type: "ping" }));
   }, WS_PING_INTERVAL_MS);
 }
 
 function connectWS() {
   if (!brokerUrl) return;
+  setWsHudState("OPENING");
   ws = new WebSocket(brokerUrl);
   ws.binaryType = "blob";
   ws.onopen = () => {
     wsReady = true;
+    setWsHudState("OPEN");
     connLabel.textContent = "broker on";
     startWsHeartbeat();
   };
   ws.onclose = () => {
     wsReady = false; connLabel.textContent = "reconnecting";
+    setWsHudState("RETRY");
     stopWsHeartbeat();
     setCanvasVideoMode(false);
     setStreamUrl(""); setTimeout(connectWS, 1500);
   };
-  ws.onerror = () => { connLabel.textContent = "socket error"; };
+  ws.onerror = () => { connLabel.textContent = "socket error"; setWsHudState("ERR"); };
   ws.onmessage = async (event) => {
     if (typeof event.data === "string") {
       try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
@@ -636,6 +692,7 @@ async function drawBrokerFrame(blob) {
   }
   streamCanvasCtx.drawImage(bitmap, 0, 0, streamCanvas.width, streamCanvas.height);
   bitmap.close();
+  markFrameDrawn();
 }
 
 async function flushBrokerFrameQueue() {
@@ -670,8 +727,8 @@ async function handleBrokerBinary(frameBlob) {
 
 function handleBrokerMessage(message) {
   if (message.type === "welcome") {
+    syncSelectedDevice(message.devices);
     if (Array.isArray(message.devices) && message.devices.length > 0) {
-      if (!message.devices.includes(deviceId)) deviceId = message.devices[0];
       connLabel.textContent = "device online";
       setCanvasVideoMode(true);
       ensureDefaultQuality();
@@ -679,6 +736,9 @@ function handleBrokerMessage(message) {
       connLabel.textContent = "connected";
     }
     return;
+  }
+  if (message.type === "device_online" && !pinnedDeviceId && !lastFrameDrawAt) {
+    deviceId = message.deviceId;
   }
   if (message.type === "device_online" && message.deviceId === deviceId) {
     connLabel.textContent = "device online";
@@ -701,6 +761,14 @@ function handleBrokerMessage(message) {
     return;
   }
   if (message.type === "pong" || message.type === "broker_status") {
+    if (message.type === "broker_status") {
+      syncSelectedDevice(message.devices);
+    }
+    if (message.type === "pong" && lastPingSentAt) {
+      lastPingRttMs = performance.now() - lastPingSentAt;
+      lastPingSentAt = 0;
+      updateHudMetrics();
+    }
     return;
   }
   if (message.type === "audio" && message.deviceId === deviceId) {
@@ -774,6 +842,10 @@ let savedPasswords = {}; // {ssid: password} — ESP32에서 내려줌
 let scanResults = [];
 
 function openWifiPanel() {
+  if (!apModeActive) {
+    connLabel.textContent = "AP mode only";
+    return;
+  }
   document.getElementById("wifi-overlay").classList.add("open");
   document.getElementById("broker-hint").style.display = "block";
   setWifiStatus("");
@@ -837,17 +909,17 @@ function renderScanList() {
         ${net.secure ? '<span class="wifi-lock">🔒</span>' : ""}
         <span>${net.rssi ?? ""}dBm</span>
       </span>`;
-    div.addEventListener("click", () => selectSsid(net.ssid, net.secure, hasSaved));
+    div.addEventListener("click", (event) => selectSsid(net.ssid, net.secure, hasSaved, event));
     list.appendChild(div);
   }
 }
 
-function selectSsid(ssid, secure, hasSaved) {
+function selectSsid(ssid, secure, hasSaved, event) {
   selectedSsid = ssid;
   selectedSsidSecure = secure;
   // 기존 selected 해제
   document.querySelectorAll(".wifi-item").forEach(el => el.classList.remove("selected"));
-  event.currentTarget.classList.add("selected");
+  event?.currentTarget?.classList.add("selected");
 
   const pwRow = document.getElementById("wifi-pw-row");
   const pwInput = document.getElementById("wifi-pw-input");
@@ -898,11 +970,10 @@ async function doWifiConnect() {
     });
     const data = await res.json();
     if (data.ok) {
-      setWifiStatus("✅ 저장 완료. ESP32가 재부팅됩니다...", "ok");
-      connectBtn.textContent = "재부팅 중...";
+      setWifiStatus("✅ 저장 완료. 브로커 모드로 전환 중입니다...", "ok");
+      connectBtn.textContent = "전환 중...";
       setTimeout(() => {
-        // 재부팅 후 브로커 URL로 안내 (broker host 알 수 없으므로 안내만)
-        setWifiStatus("재부팅 완료 후 브로커 네트워크에서 접속하세요", "ok");
+        setWifiStatus("전환 후 브로커 페이지에서 다시 접속하세요", "ok");
         closeWifiPanel();
       }, 4000);
     } else {
@@ -1400,6 +1471,7 @@ window.addEventListener("pagehide", () => { talkEnd(); setCanvasVideoMode(false)
 // ============================================================
 if (isApOrLocal) {
   // AP / 로컬 STA 모드
+  setWsHudState("AP");
   connLabel.textContent = "AP 모드";
   resLabel.textContent = DEFAULT_CAMERA_QUALITY;
   ensureDefaultQuality();
@@ -1410,8 +1482,12 @@ if (isApOrLocal) {
   // broker 모드
   apBanner.classList.remove("visible");
   resLabel.textContent = DEFAULT_CAMERA_QUALITY;
+  setWsHudState("OFF");
   connectWS();
 }
+
+hudTimer = window.setInterval(updateHudMetrics, 250);
+updateHudMetrics();
 </script>
 </body>
 </html>
