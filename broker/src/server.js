@@ -6,6 +6,7 @@ const config = require("./config");
 
 const clients = new Map();
 const devices = new Map();
+const VIDEO_FRAME_MESSAGE = 1;
 
 function sendJson(socket, payload) {
   if (socket.readyState === socket.OPEN) {
@@ -79,6 +80,7 @@ function reqCleanup(res, cleanup) {
 
 function broadcastFrame(deviceEntry, frameBuffer) {
   deviceEntry.latestFrame = frameBuffer;
+  broadcastVideoFrameToClients(deviceEntry.deviceId, frameBuffer);
   if (!deviceEntry.streamClients) {
     return;
   }
@@ -170,11 +172,34 @@ function broadcastToClients(payload) {
   }
 }
 
+function encodeVideoFrameMessage(deviceId, frameBuffer) {
+  const deviceIdBuffer = Buffer.from(deviceId, "utf8");
+  const output = Buffer.allocUnsafe(1 + 2 + deviceIdBuffer.length + frameBuffer.length);
+  output.writeUInt8(VIDEO_FRAME_MESSAGE, 0);
+  output.writeUInt16BE(deviceIdBuffer.length, 1);
+  deviceIdBuffer.copy(output, 3);
+  frameBuffer.copy(output, 3 + deviceIdBuffer.length);
+  return output;
+}
+
+function sendVideoFrame(socket, deviceId, frameBuffer) {
+  if (socket.readyState !== socket.OPEN) {
+    return;
+  }
+  socket.send(encodeVideoFrameMessage(deviceId, frameBuffer), { binary: true });
+}
+
 function broadcastAudioToClients(payload) {
   for (const client of clients.values()) {
     if (client.ws.readyState === client.ws.OPEN) {
       client.ws.send(JSON.stringify(payload));
     }
+  }
+}
+
+function broadcastVideoFrameToClients(deviceId, frameBuffer) {
+  for (const client of clients.values()) {
+    sendVideoFrame(client.ws, deviceId, frameBuffer);
   }
 }
 
@@ -316,6 +341,12 @@ clientWss.on("connection", (ws) => {
     clientId,
     devices: [...devices.keys()]
   });
+
+  for (const deviceEntry of devices.values()) {
+    if (deviceEntry.latestFrame) {
+      sendVideoFrame(ws, deviceEntry.deviceId, deviceEntry.latestFrame);
+    }
+  }
 
   ws.on("message", (raw) => {
     markAlive(entry);

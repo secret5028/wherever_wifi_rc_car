@@ -57,6 +57,10 @@ constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
 constexpr size_t AUDIO_ADPCM_HEADER_BYTES = 4;
 constexpr size_t AUDIO_ADPCM_PAYLOAD_BYTES = AUDIO_ADPCM_HEADER_BYTES + ((AUDIO_STREAM_SAMPLES - 1 + 1) / 2);
 constexpr size_t AUDIO_BASE64_BUFFER_LEN = 433;
+constexpr int32_t AUDIO_HPF_ALPHA_NUM = 995;
+constexpr int32_t AUDIO_HPF_ALPHA_DEN = 1000;
+constexpr int32_t AUDIO_NOISE_GATE = 32;
+constexpr int32_t AUDIO_SOFTWARE_GAIN = 10;
 
 unsigned long lastWifiAttemptAt = 0;
 unsigned long wifiConnectStartedAt = 0;
@@ -86,6 +90,7 @@ bool serverStarted = false;
 bool hasStoredWifi = false;
 bool localAudioWsStarted = false;
 bool cameraCaptureTaskStarted = false;
+bool brokerDisconnectLatched = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 uint8_t brokerDisconnectCount = 0;
@@ -614,6 +619,7 @@ void resetBrokerFailureCounters() {
   brokerWsErrorCount = 0;
   brokerVideoFailCount = 0;
   brokerAudioFailCount = 0;
+  brokerDisconnectLatched = false;
 }
 
 void scheduleBrokerRecovery(const char* reason) {
@@ -624,6 +630,7 @@ void scheduleBrokerRecovery(const char* reason) {
   Serial.printf("[SYS] broker recovery: %s\n", reason);
   safeStop();
   resetBrokerFailureCounters();
+  setConnectOnBoot(true);
   wsConnected = false;
   wsConnectInFlight = false;
   wifiConnectInFlight = false;
@@ -650,10 +657,13 @@ void configureWebSocket() {
       case WStype_DISCONNECTED:
         Serial.println("[WS] disconnected");
         safeStop();
-        brokerDisconnectCount++;
-        if (brokerDisconnectCount >= BROKER_RECOVERY_DISCONNECTS) {
-          scheduleBrokerRecovery("ws_disconnected_repeated");
-          break;
+        if (!brokerDisconnectLatched) {
+          brokerDisconnectLatched = true;
+          brokerDisconnectCount++;
+          if (brokerDisconnectCount >= BROKER_RECOVERY_DISCONNECTS) {
+            scheduleBrokerRecovery("ws_disconnected_repeated");
+            break;
+          }
         }
         scheduleReconnect();
         break;
@@ -1227,15 +1237,16 @@ void uploadVideoFrameIfNeeded() {
 
 int16_t filterAudioSample(int16_t sample) {
   int32_t input = sample;
-  audioHighpassState = (995 * (audioHighpassState + input - audioHighpassLastInput)) / 1000;
+  audioHighpassState =
+    (AUDIO_HPF_ALPHA_NUM * (audioHighpassState + input - audioHighpassLastInput)) / AUDIO_HPF_ALPHA_DEN;
   audioHighpassLastInput = input;
 
   int32_t filtered = audioHighpassState;
-  if (abs(filtered) < 32) {
+  if (abs(filtered) < AUDIO_NOISE_GATE) {
     filtered = 0;
   }
 
-  filtered *= 8;
+  filtered *= AUDIO_SOFTWARE_GAIN;
   filtered = constrain(filtered, -32768, 32767);
   return static_cast<int16_t>(filtered);
 }

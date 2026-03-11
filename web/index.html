@@ -373,6 +373,9 @@ let apAudioPaused = false;
 let apResumeVideoTimer = 0;
 let apResumeAudioTimer = 0;
 let selectedSsidSecure = true;
+let brokerCanvasActive = false;
+let brokerFrameBusy = false;
+let brokerQueuedFrame = null;
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
@@ -534,6 +537,16 @@ function setStreamUrl(nextUrl) {
   if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
 }
 
+function setCanvasVideoMode(enabled) {
+  brokerCanvasActive = enabled;
+  streamEl.style.display = enabled ? "none" : "";
+  streamCanvas.classList.toggle("visible", enabled);
+  if (!enabled) {
+    brokerQueuedFrame = null;
+    brokerFrameBusy = false;
+  }
+}
+
 async function drawApFrame(blob) {
   if (!blob || blob.size < 1024) return false;
   const bitmap = await createImageBitmap(blob);
@@ -549,8 +562,7 @@ async function drawApFrame(blob) {
 async function startApVideoLoop() {
   if (apVideoLoopActive) return;
   apVideoLoopActive = true;
-  streamEl.style.display = "none";
-  streamCanvas.classList.add("visible");
+  setCanvasVideoMode(true);
 
   while (apModeActive) {
     try {
@@ -592,6 +604,7 @@ function startWsHeartbeat() {
 function connectWS() {
   if (!brokerUrl) return;
   ws = new WebSocket(brokerUrl);
+  ws.binaryType = "blob";
   ws.onopen = () => {
     wsReady = true;
     connLabel.textContent = "broker on";
@@ -600,12 +613,59 @@ function connectWS() {
   ws.onclose = () => {
     wsReady = false; connLabel.textContent = "reconnecting";
     stopWsHeartbeat();
+    setCanvasVideoMode(false);
     setStreamUrl(""); setTimeout(connectWS, 1500);
   };
   ws.onerror = () => { connLabel.textContent = "socket error"; };
-  ws.onmessage = (event) => {
-    try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
+  ws.onmessage = async (event) => {
+    if (typeof event.data === "string") {
+      try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
+      return;
+    }
+    await handleBrokerBinary(event.data);
   };
+}
+
+async function drawBrokerFrame(blob) {
+  if (!blob || blob.size < 1024) return;
+  setCanvasVideoMode(true);
+  const bitmap = await createImageBitmap(blob);
+  if (streamCanvas.width !== bitmap.width || streamCanvas.height !== bitmap.height) {
+    streamCanvas.width = bitmap.width;
+    streamCanvas.height = bitmap.height;
+  }
+  streamCanvasCtx.drawImage(bitmap, 0, 0, streamCanvas.width, streamCanvas.height);
+  bitmap.close();
+}
+
+async function flushBrokerFrameQueue() {
+  if (brokerFrameBusy || !brokerQueuedFrame) return;
+  brokerFrameBusy = true;
+  const nextFrame = brokerQueuedFrame;
+  brokerQueuedFrame = null;
+  try {
+    await drawBrokerFrame(nextFrame);
+  } catch {
+    connLabel.textContent = "video retry";
+  } finally {
+    brokerFrameBusy = false;
+    if (brokerQueuedFrame) {
+      queueMicrotask(flushBrokerFrameQueue);
+    }
+  }
+}
+
+async function handleBrokerBinary(frameBlob) {
+  const packet = await frameBlob.arrayBuffer();
+  const view = new DataView(packet);
+  if (view.byteLength < 4 || view.getUint8(0) !== 1) return;
+  const deviceIdLen = view.getUint16(1);
+  const frameStart = 3 + deviceIdLen;
+  if (view.byteLength <= frameStart) return;
+  const packetDeviceId = new TextDecoder().decode(new Uint8Array(packet, 3, deviceIdLen));
+  if (packetDeviceId !== deviceId) return;
+  brokerQueuedFrame = new Blob([packet.slice(frameStart)], { type: "image/jpeg" });
+  flushBrokerFrameQueue();
 }
 
 function handleBrokerMessage(message) {
@@ -613,7 +673,7 @@ function handleBrokerMessage(message) {
     if (Array.isArray(message.devices) && message.devices.length > 0) {
       if (!message.devices.includes(deviceId)) deviceId = message.devices[0];
       connLabel.textContent = "device online";
-      setStreamUrl(getRemoteVideoUrl(deviceId));
+      setCanvasVideoMode(true);
       ensureDefaultQuality();
     } else {
       connLabel.textContent = "connected";
@@ -622,12 +682,13 @@ function handleBrokerMessage(message) {
   }
   if (message.type === "device_online" && message.deviceId === deviceId) {
     connLabel.textContent = "device online";
-    setStreamUrl(getRemoteVideoUrl(deviceId));
+    setCanvasVideoMode(true);
     ensureDefaultQuality();
     return;
   }
   if (message.type === "device_offline" && message.deviceId === deviceId) {
     connLabel.textContent = "device offline";
+    setCanvasVideoMode(false);
     setStreamUrl("");
     return;
   }
@@ -636,8 +697,7 @@ function handleBrokerMessage(message) {
     else if (typeof message.batteryMv === "number") batVal.textContent = `${(message.batteryMv/1000).toFixed(2)}V`;
     const sig = signalPercentFromRssi(message.rssi);
     rssiVal.textContent = sig !== null ? `${sig}%` : "--%";
-    if (message.remoteVideoUrl) setStreamUrl(`${location.origin}${message.remoteVideoUrl}`);
-    else if (message.localIp && message.streamPath) setStreamUrl(`http://${message.localIp}${message.streamPath}`);
+    if (!apModeActive) setCanvasVideoMode(true);
     return;
   }
   if (message.type === "pong" || message.type === "broker_status") {
@@ -671,7 +731,12 @@ async function doSnap() {
   btnSnap.classList.add("active");
   const restoreQuality = qualityList[resIdx];
   try {
-    if (!streamEl.src) return;
+    const useCanvasVideo = apModeActive || brokerCanvasActive;
+    if (useCanvasVideo) {
+      if (!(streamCanvas.width > 0 && streamCanvas.height > 0)) return;
+    } else if (!streamEl.src) {
+      return;
+    }
     if (restoreQuality !== "UXGA") { requestQuality("UXGA"); await wait(1400); }
     if (apModeActive) {
       const res = await fetch(`${ESP32_BASE}/jpg?snap=${Date.now()}`, { cache: "no-store" });
@@ -682,10 +747,10 @@ async function doSnap() {
       a.href = url; a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g,"-")}.jpg`;
       a.click(); URL.revokeObjectURL(url);
     } else {
-      snapshotCanvas.width = streamEl.naturalWidth || 1280;
-      snapshotCanvas.height = streamEl.naturalHeight || 720;
+      snapshotCanvas.width = useCanvasVideo ? (streamCanvas.width || 1280) : (streamEl.naturalWidth || 1280);
+      snapshotCanvas.height = useCanvasVideo ? (streamCanvas.height || 720) : (streamEl.naturalHeight || 720);
       const ctx = snapshotCanvas.getContext("2d");
-      ctx.drawImage(streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+      ctx.drawImage(useCanvasVideo ? streamCanvas : streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
       snapshotCanvas.toBlob((blob) => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
@@ -1200,20 +1265,21 @@ async function talkEnd() {
 // ============================================================
 async function toggleRec() {
   if (recOn) { recorderState.recorder?.stop(); return; }
-  const videoSource = apModeActive ? streamCanvas : streamEl;
-  const hasVideo = apModeActive
+  const useCanvasVideo = apModeActive || brokerCanvasActive;
+  const videoSource = useCanvasVideo ? streamCanvas : streamEl;
+  const hasVideo = useCanvasVideo
     ? (streamCanvas.width > 0 && streamCanvas.height > 0)
     : !!streamEl.src;
   if (!hasVideo) return;
   try {
-    const width = apModeActive
+    const width = useCanvasVideo
       ? (streamCanvas.width || 640)
       : (streamEl.naturalWidth || 640);
-    const height = apModeActive
+    const height = useCanvasVideo
       ? (streamCanvas.height || 480)
       : (streamEl.naturalHeight || 480);
 
-    if (apModeActive) {
+    if (useCanvasVideo) {
       recorderState.stream = streamCanvas.captureStream(12);
     } else {
       snapshotCanvas.width = width; snapshotCanvas.height = height;
@@ -1322,12 +1388,12 @@ btnTalk.addEventListener("contextmenu", (event) => event.preventDefault());
 btnRec.addEventListener("click", () => { armAudioPlayback(); toggleRec(); });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { talkEnd(); setStreamUrl(""); releaseWakeLock(); }
-  else { requestWakeLock(); if (!apModeActive && deviceId) setStreamUrl(getRemoteVideoUrl(deviceId)); }
+  if (document.hidden) { talkEnd(); setCanvasVideoMode(false); setStreamUrl(""); releaseWakeLock(); }
+  else { requestWakeLock(); }
 });
 window.addEventListener("pointerup", talkEnd);
 window.addEventListener("blur", talkEnd);
-window.addEventListener("pagehide", () => { talkEnd(); setStreamUrl(""); releaseWakeLock(); });
+window.addEventListener("pagehide", () => { talkEnd(); setCanvasVideoMode(false); setStreamUrl(""); releaseWakeLock(); });
 
 // ============================================================
 // 초기화
