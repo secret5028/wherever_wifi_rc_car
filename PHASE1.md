@@ -1,39 +1,27 @@
 # Phase 1
 
-## Goal
+Phase 1 is no longer just "basic control path verified". The current target behavior is:
 
-Verify the remote control path:
+- AP mode for initial provisioning
+- stored Wi-Fi + broker config
+- persistent broker connection while power stays on
+- browser-triggered media start
+- control path independent from media path
 
-`phone/PC -> Oracle VM broker -> ESP32`
-
-## Components
-
-- Oracle VM runs the Node.js broker
-- ESP32 opens an outbound WebSocket connection to the broker
-- Browser test page sends control messages to the broker
-
-## Firmware Scope
-
-- Wi-Fi connect
-- Outbound WebSocket connect
-- Heartbeat
-- Exponential reconnect
-- Safe stop on timeout/disconnect
-- Receive `ctrl` messages
-- Send `status` messages
-
-## Message Shapes
+## Current Message Families
 
 Client to broker:
 
 ```json
 { "type": "ctrl", "throttle": 40, "steering": -15 }
+{ "type": "stream", "enabled": true }
+{ "type": "talk", "enabled": true }
 ```
 
 ESP32 to broker:
 
 ```json
-{ "type": "status", "rssi": -55, "uptime": 123456, "throttle": 40, "steering": -15 }
+{ "type": "status", "rssi": -55, "uptime": 123456, "streamEnabled": true }
 ```
 
 Heartbeat:
@@ -43,50 +31,40 @@ Heartbeat:
 { "type": "pong" }
 ```
 
-## Oracle VM Run Steps
+## Oracle VM Runtime
 
 ```bash
-sudo apt update
-sudo apt install -y nodejs npm
 cd ~/rc-car/broker
 npm install
 node src/server.js
 ```
 
-Open the browser test page at:
+Public page:
 
 ```text
 http://YOUR_VM_IP:8080/
 ```
 
-## Oracle Ingress Rules Needed
+Required ingress:
 
-- TCP `22` for SSH
-- TCP `8080` for Phase 1 broker and test page
+- TCP `22`
+- TCP `8080`
 
-Later phases should move the public endpoint to `443` with TLS.
+## Device Expectations
 
-## ESP32 Arduino Libraries
-
-- `WebSockets` by Markus Sattler
-- `ArduinoJson`
-
-## ESP32 Setup
-
-1. Copy `firmware/phase1_esp32/secrets.example.h` to `secrets.h`
-2. Fill in Wi-Fi credentials and Oracle VM IP
-3. Flash the sketch
-4. Open serial monitor at `115200`
-5. Confirm:
+Expected serial sequence in broker mode:
 
 ```text
-[WIFI] connecting
+[WIFI] connecting to ...
+[WS] connecting
 [WS] connected
+[WS] broker hello
 ```
 
-## Success Criteria
+Expected behavior:
 
-- Browser connects to `/client`
-- ESP32 connects to `/device`
-- Sending a control message from the browser produces a control log on the ESP32
-- Disconnecting the broker or Wi-Fi causes safe stop and reconnect attempts
+- control works without media start
+- audio/video are broker-relayed
+- browser `START` triggers remote stream
+- browser-triggered stream and broker-mode control are currently stable on plain `HTTP/WS`
+- PTT logic exists in code, but public browser use still needs HTTPS before it is treated as complete

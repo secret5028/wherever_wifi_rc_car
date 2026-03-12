@@ -1,156 +1,65 @@
 # RC Car Next Session Prompt
 
-## Current Goal Context
+## Current Architecture
 
-This project is an ESP32-S3 Sense based remote RC car system.
+- board: `Seeed Studio XIAO ESP32S3 Sense`
+- public broker: Oracle VM at `158.179.163.102:8080`
+- device path: `/device`
+- client path: `/client`
+- control: WebSocket relay
+- media uplink: ESP32 -> broker
+- remote video display: broker MJPEG feed rendered into browser canvas
 
-The current architecture is:
+## Current Intended Runtime
 
-- `ESP32-S3 Sense -> outbound WebSocket -> Oracle VM broker`
-- `browser client -> Oracle VM broker -> ESP32`
-- `ESP32 camera -> Oracle VM relay -> browser`
-- `ESP32 built-in microphone -> Oracle VM relay -> browser`
+1. first boot enters AP mode
+2. AP page stores Wi-Fi + broker settings
+3. after reboot the board reconnects to Wi-Fi and broker automatically
+4. board remains connected to broker while powered
+5. browser `START` requests remote stream
+6. `TALK` pauses video and resumes it on release, but public browser use still needs HTTPS
 
-The Oracle VM is the public rendezvous/broker point. The ESP32 never requires inbound port forwarding.
+## What Is Confirmed
 
-## What Is Already Working
+- Oracle VM broker is reachable from the public internet
+- broker process is running on the VM
+- ESP32 control path works through the broker
+- ESP32 audio uplink works through the broker
+- ESP32 video frames are reaching the broker
+- broker-mode page, video, and control are currently working again on `http://158.179.163.102:8080`
+- pin map for servo / motor / amp is fixed in `PINMAP.md`
 
-### Control Path
+## Current Suspect Area
 
-- Remote control path works end to end:
-  - `browser -> Oracle VM -> ESP32`
-- ESP32 connects to Wi-Fi and keeps an outbound broker connection alive.
-- Browser can send throttle/steering control messages.
-- ESP32 receives control packets and reports status back.
-- Steering servo now works on the XIAO board using `ESP32Servo` on `GPIO3`.
-- Camera initialization should stay ahead of actuator initialization.
+The main remaining unfinished area is public PTT:
 
-### Video Path
+- browser microphone permission is blocked on plain `HTTP`
+- temporary self-signed HTTPS attempt was rolled back
+- next PTT work should use a cleaner HTTPS path instead of patching around it
 
-- Local camera stream works on the ESP32.
-- Remote video relay through the Oracle VM works in the browser.
-- Current remote video settings are tuned for usable latency/stability:
-  - `FRAMESIZE_QVGA`
-  - `jpeg_quality = 14`
-  - `VIDEO_UPLOAD_INTERVAL_MS = 220`
+Video and control should not be redesigned first; they are in a usable state again.
 
-### Audio Path
+## Important Local Facts
 
-- Built-in XIAO ESP32S3 Sense microphone is used.
-- Remote audio uplink works:
-  - ESP32 encodes
-  - browser decodes
-  - broker relays
-- MAX98357A amp wiring on the XIAO has been hardware-verified with a boot tone:
-  - `BCLK = GPIO7`
-  - `LRC/WS = GPIO8`
-  - `DIN = GPIO4`
-- Browser-to-board PTT downlink code has been added locally and pushed, but it is not working end to end on the public service yet.
-- Latest serial check proved:
-  - `talk` control messages reach the ESP32
-  - `talk_audio` payloads do not reach the ESP32
-  - the first suspect is still Oracle VM broker/web deployment
-- Audio currently uses `16kHz IMA ADPCM`.
-- Latest tuning that the user considered acceptable:
-  - reduced video burden
-  - audio gate relaxed
-  - audio gain increased
+- Oracle SSH key exists on this PC in `C:\Users\song-bj\Downloads\ssh-key-2026-03-08.key`
+- latest broker and web files have already been redeployed to the Oracle VM
+- latest firmware has already been reflashed to `COM10`
 
-### Orientation
+## Next Tasks
 
-- Sensor-side mirror control was inconsistent on this board/camera combo.
-- Final practical fix:
-  - user-facing local page mirrors in browser
-  - remote console mirrors in browser
-- Raw `/stream` remains an unmodified low-level MJPEG endpoint.
+1. Keep AP provisioning policy clear
+   - AP for first setup
+   - broker connection persistent afterward
+   - media on demand only
 
-## Important Current Notes
+2. Keep broker mode stable on plain `HTTP/WS`
+   - do not re-enable TLS on the broker until a cleaner deployment path is chosen
+   - do not change ESP32 back to `beginSSL()` yet
 
-- `arduino-cli.compile.yaml` is a local-only file and should not be committed.
-- Oracle VM broker is already running and the repo has been pushed to GitHub.
-- Confirmed progress is logged in `WORKLOG.md`.
-- Current main branch already contains the latest accepted state.
-- The current PC does not have the working Oracle VM SSH private key, so broker/web redeploy to the VM was not completed from this machine.
+3. Revisit PTT only after transport is settled
+   - likely solution is reverse proxy or proper HTTPS endpoint
+   - browser microphone policy is the blocker, not basic relay logic
 
-## March 11 Tasks
-
-The next session should execute these in order:
-
-1. Deploy the latest `main` branch to the Oracle VM broker host
-   - use the company PC or Oracle console recovery path if needed
-   - `cd ~/rc-car && git pull origin main`
-   - restart the Node broker process and confirm startup logs
-   - this step is mandatory before debugging browser-to-board PTT audio further
-
-2. Verify the mobile browser UI on a real phone
-   - portrait layout should fill the screen with no top/bottom empty margins
-   - confirm the controller page reflects the latest `web/index.html`
-
-3. Verify snapshot UX
-   - while streaming in `QVGA`, pressing `SNAP` should temporarily switch to `UXGA`
-   - snapshot should be captured after the temporary quality bump
-   - stream should return to the previous quality after the snapshot
-
-4. Verify signal display
-   - HUD label should be `SIG`
-   - signal should display as percent instead of raw RSSI dBm
-
-5. Review and confirm the hardware pin map document
-   - use `PINMAP.md` as the current reference
-   - confirm the recommended TB6612FNG, servo, LED, and MAX98357A assignments
-   - servo is currently `GPIO3` via `ESP32Servo`
-   - keep the motor plan aligned to the 3-pin drive layout: `1 PWM + 2 direction pins`
-   - treat `GPIO9` as optional spare / standby only if needed
-
-6. If remote web still shows the old layout, treat that as a deployment issue first
-   - do not debug frontend behavior before confirming the VM is serving the new files
-
-7. Re-test browser-to-board PTT after Oracle VM deployment
-   - expected ESP32 serial:
-     - `[TALK] on`
-     - `[SPK] talk_audio seq=... samples=... b64=...`
-   - if only `[TALK] on/off` appears, the issue is still upstream of the ESP32
-   - if `talk_audio` reaches the ESP32 but no sound comes out, then debug the decode/playback path
-
-## Next Session Main Tasks
-
-The next conversation should focus on:
-
-1. Decide the user control UI
-   - phone-first or desktop-first
-   - joystick layout
-   - throttle/steering UX
-   - audio/video placement
-   - status indicators
-
-2. Finalize motor/servo pin mapping and hardware control
-   - TB6612FNG motor driver pins
-   - PWM channel assignment
-   - steering servo pin (`GPIO3`, `ESP32Servo`)
-   - standby pin
-   - failsafe stop behavior
-
-3. Implement real motor output
-   - connect throttle to DC motor PWM/direction
-   - connect steering to servo
-   - preserve broker control path already proven in Phase 1
-
-4. Keep the current networking/video/audio architecture unless there is a strong reason to change it
-
-## Current Working Assumptions
-
-- Board: `Seeed Studio XIAO ESP32S3 Sense`
-- Public broker: Oracle VM
-- User client: browser
-- Remote transport:
-  - control via WebSocket messages
-  - video via remote MJPEG relay
-  - audio via browser-decoded ADPCM stream
-
-## Recommended Starting Point For The Next Conversation
-
-Start from:
-
-"Use the current working Oracle VM + browser + ESP32 architecture.
-Do not redesign networking.
-Next, define the user control UI and then wire real motor/servo control with final pin assignments."
+4. Do not redesign networking yet
+   - keep broker relay model
+   - keep control/media separation

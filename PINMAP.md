@@ -7,8 +7,8 @@
 - `GPIO3`: steering servo PWM via `ESP32Servo`
 - `GPIO5`: motor direction 1
 - `GPIO6`: motor direction 2
-- `GPIO41`: microphone clock
-- `GPIO42`: microphone data
+- `GPIO42`: microphone clock
+- `GPIO41`: microphone data
 - `GPIO43`: status LED
 
 ### Camera Pins
@@ -82,9 +82,9 @@ The current board and firmware layout can support:
 Notes:
 
 - Steering is now confirmed working on `GPIO3` when driven through `ESP32Servo`.
-- Camera should initialize before actuator setup so servo control is not disturbed by camera startup.
+- Current boot policy should prioritize provisioning/AP responsiveness first, then media initialization.
 - MAX98357A wiring has been hardware-verified with a boot tone on:
   - `GPIO7` `BCLK`
   - `GPIO8` `LRC/WS`
   - `GPIO4` `DIN`
-- Browser-to-board PTT playback code exists, but public end-to-end validation still depends on Oracle VM broker/web deployment.
+- Broker mode now uses on-demand stream start instead of unconditional remote video start.

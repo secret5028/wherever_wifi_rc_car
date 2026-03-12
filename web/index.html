@@ -46,6 +46,16 @@
     position: relative; z-index: 1; background: #111;
   }
   #stream[src=""] { opacity: 0; }
+  #stream.feed-only {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    top: 0;
+    left: 0;
+    opacity: 0.01;
+    pointer-events: none;
+    z-index: 0;
+  }
   #stream-canvas {
     width: 100%; height: 100%; display: none;
     position: relative; z-index: 1; background: #111;
@@ -87,42 +97,6 @@
   .rssi-val { color: var(--blue); }
   .res-val { color: #fef08a; }
   .hud-hidden { display: none !important; }
-  .ap-setup-only #stream-wrap { display: none; }
-  .ap-setup-only #control-panel { display: none; }
-  .ap-setup-only #btn-led,
-  .ap-setup-only #btn-snap,
-  .ap-setup-only #btn-talk,
-  .ap-setup-only #btn-rec { display: none; }
-  .ap-setup-only #toolbar { border-top: none; }
-  .ap-setup-only #btn-net {
-    flex: 1;
-    background: rgba(249, 115, 22, 0.16);
-    color: var(--orange);
-  }
-  #setup-summary {
-    display: none;
-    margin: 18px 14px 10px;
-    padding: 16px 18px;
-    border-radius: 14px;
-    background: linear-gradient(160deg, rgba(22,33,62,0.96), rgba(15,23,42,0.96));
-    border: 1px solid rgba(255,255,255,0.08);
-    color: var(--text);
-    line-height: 1.6;
-  }
-  .ap-setup-only #setup-summary { display: block; }
-  #setup-summary h2 {
-    font-family: "Orbitron", sans-serif;
-    font-size: 14px;
-    letter-spacing: 1px;
-    color: #fef08a;
-    margin-bottom: 10px;
-  }
-  #setup-summary p {
-    font-size: 12px;
-    color: rgba(255,255,255,0.72);
-    margin-bottom: 8px;
-  }
-  #setup-summary strong { color: #fff; }
 
   /* AP모드 배너 */
   #ap-banner {
@@ -149,6 +123,7 @@
   }
   .tb-btn:last-child { border-right: none; }
   .tb-btn:active, .tb-btn.active { background: var(--btn-active); color: var(--green); }
+  #btn-talk { touch-action: none; user-select: none; }
   .tb-btn.rec-btn { background: var(--red); color: #fff; }
   .tb-btn.rec-btn.active { background: #b91c1c; animation: pulse 1s infinite; }
   .tb-btn.net-btn { color: var(--orange); }
@@ -307,12 +282,6 @@
 <div id="app">
   <div id="ap-banner" class="visible">⚡ AP 로컬 모드 — 192.168.4.1 직접 연결 중</div>
 
-  <section id="setup-summary">
-    <h2>설정 전용 AP 모드</h2>
-    <p><strong>이 모드에서는 스트리밍, 조종, 오디오를 제공하지 않습니다.</strong></p>
-    <p>하단의 <strong>NET</strong> 버튼을 눌러 Wi-Fi를 선택하고 저장하면 보드가 재부팅 없이 브로커 모드로 전환됩니다.</p>
-  </section>
-
   <div id="stream-wrap">
     <img id="stream" src="" alt="stream" crossorigin="anonymous">
     <canvas id="stream-canvas"></canvas>
@@ -322,15 +291,13 @@
         <span>BAT : <span class="bat-val" id="bat-val">0%</span></span>
         <span>SIG : <span class="rssi-val" id="rssi-val">100%</span></span>
         <span class="res-val" id="res-label">QVGA</span>
-        <span>WS : <span id="ws-val">--</span></span>
-        <span>RTT : <span id="rtt-val">--</span></span>
-        <span>VID : <span id="video-age-val">--</span></span>
         <span class="hud-hidden" id="conn-label">connecting</span>
       </div>
     </div>
   </div>
 
   <div id="toolbar">
+    <button class="tb-btn" id="btn-stream" type="button">STREAM</button>
     <button class="tb-btn" id="btn-led" type="button">LED</button>
     <button class="tb-btn net-btn" id="btn-net" type="button">NET</button>
     <button class="tb-btn" id="btn-snap" type="button">SNAP</button>
@@ -356,7 +323,7 @@
     </h2>
     <div id="broker-hint">
       ✅ Wi-Fi 선택 후 <b>연결</b>을 누르면 브로커 모드로 전환됩니다.<br>
-      저장 후 재부팅 없이 브로커 모드로 전환됩니다.
+      연결 성공 시 자동으로 리부팅됩니다.
     </div>
     <div id="wifi-scan-list">
       <div style="color:rgba(255,255,255,0.3);font-size:12px;text-align:center;padding:12px">
@@ -394,40 +361,38 @@ const defaultDeviceId = "rc-car-01";
 const DEFAULT_CAMERA_QUALITY = "QVGA";
 const queryDeviceId = new URLSearchParams(location.search).get("deviceId");
 let deviceId = (queryDeviceId && queryDeviceId.trim()) || defaultDeviceId;
-const pinnedDeviceId = Boolean(queryDeviceId && queryDeviceId.trim());
 const qualityList = ["QVGA", "VGA", "SVGA", "UXGA"];
 
 let ws = null;
 let wsReady = false;
-const WS_PING_INTERVAL_MS = 10000;
-let wsPingTimer = 0;
 let driveMode = true;
 let resIdx = qualityList.indexOf(DEFAULT_CAMERA_QUALITY);
 if (resIdx < 0) resIdx = 0;
 let ledOn = false;
 let talkOn = false;
 let talkPointerId = null;
+let talkTransition = null;
 let recOn = false;
 let streamUrl = "";
 let snapshotInFlight = false;
 let wakeLockSentinel = null;
 let apModeActive = isApOrLocal;
 let apVideoLoopActive = false;
+let brokerDeviceOnline = false;
+let brokerStreamRequested = false;
+let brokerStreamActive = false;
 let defaultQualityApplied = false;
 let apVideoPaused = false;
 let apAudioPaused = false;
 let apResumeVideoTimer = 0;
 let apResumeAudioTimer = 0;
-let selectedSsidSecure = true;
-let brokerCanvasActive = false;
-let brokerFrameBusy = false;
-let brokerQueuedFrame = null;
-let wsHudState = apModeActive ? "AP" : "OFF";
-let lastPingSentAt = 0;
-let lastPingRttMs = null;
-let lastFrameDrawAt = 0;
-let smoothedVideoAgeMs = 0;
-let hudTimer = 0;
+let brokerPingTimer = 0;
+let resumeStreamAfterTalk = false;
+let brokerStreamRetryTimer = 0;
+let brokerVideoLoopActive = false;
+let brokerLastFrameAt = 0;
+let brokerTalkActive = false;
+let lastTalkError = "";
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
@@ -441,10 +406,8 @@ const connLabel = document.getElementById("conn-label");
 const batVal = document.getElementById("bat-val");
 const rssiVal = document.getElementById("rssi-val");
 const resLabel = document.getElementById("res-label");
-const wsVal = document.getElementById("ws-val");
-const rttVal = document.getElementById("rtt-val");
-const videoAgeVal = document.getElementById("video-age-val");
 const modeLabel = document.getElementById("mode-label");
+const btnStream = document.getElementById("btn-stream");
 const btnLed = document.getElementById("btn-led");
 const btnNet = document.getElementById("btn-net");
 const btnSnap = document.getElementById("btn-snap");
@@ -508,10 +471,82 @@ const talkAudioState = {
   muteGain: null, pendingSamples: [], seq: 0, stepIndex: 0, sentChunks: 0,
   captureSampleRate: 16000, targetSampleRate: 16000, uploadQueue: [], uploadInFlight: false
 };
+const pendingCommandAcks = new Map();
 
 function setButtonState(button, active) {
   button.classList.toggle("active", active);
   button.classList.toggle("btn-on", active && button !== btnRec);
+}
+
+function setTalkUiActive(active) {
+  setButtonState(btnTalk, active);
+  talkOverlay.classList.toggle("visible", !!active);
+}
+
+function describeTalkCaptureError(error) {
+  if (!window.isSecureContext && !apModeActive) {
+    return "ptt needs https";
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return "mic api unavailable";
+  }
+  const name = String(error?.name || "");
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "mic permission denied";
+  }
+  if (name === "NotFoundError") {
+    return "mic not found";
+  }
+  if (name === "NotReadableError") {
+    return "mic busy";
+  }
+  return "mic open failed";
+}
+
+function clearPendingCommandAck(commandType, result) {
+  const pending = pendingCommandAcks.get(commandType);
+  if (!pending) return;
+  window.clearTimeout(pending.timer);
+  pendingCommandAcks.delete(commandType);
+  pending.resolve(result);
+}
+
+function sendBrokerCommandWithAck(commandType, payload, timeoutMs = 1200) {
+  if (apModeActive || !wsReady || !brokerDeviceOnline) return Promise.resolve(false);
+  if (!send(payload)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const previous = pendingCommandAcks.get(commandType);
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.resolve(false);
+    }
+    const timer = window.setTimeout(() => {
+      pendingCommandAcks.delete(commandType);
+      resolve(false);
+    }, timeoutMs);
+    pendingCommandAcks.set(commandType, { resolve, timer });
+  });
+}
+
+function updateStreamButton() {
+  if (apModeActive) {
+    btnStream.style.display = "none";
+    return;
+  }
+
+  btnStream.style.display = "";
+  btnStream.disabled = !brokerDeviceOnline || !wsReady;
+  setButtonState(btnStream, brokerStreamActive);
+
+  if (!brokerDeviceOnline) {
+    btnStream.textContent = "NO CAM";
+  } else if (brokerStreamActive) {
+    btnStream.textContent = "STOP";
+  } else if (brokerStreamRequested) {
+    btnStream.textContent = "WAIT";
+  } else {
+    btnStream.textContent = "START";
+  }
 }
 
 // 공통 컨트롤 함수 - AP/broker 자동 분기
@@ -519,7 +554,7 @@ function sendCtrl(throttle, steering) {
   if (apModeActive) {
     apPost("/api/control", { throttle, steering });
   } else {
-    send({ type: "ctrl", deviceId, throttle, steering });
+    send({ type: "ctrl", deviceId, throttle, steering, sentAt: Date.now() });
   }
 }
 
@@ -564,57 +599,6 @@ function signalPercentFromRssi(rssi) {
   return Math.max(0, Math.min(100, Math.round(((rssi + 100) / 50) * 100)));
 }
 
-function formatAgeMs(ageMs) {
-  if (typeof ageMs !== "number" || !Number.isFinite(ageMs) || ageMs < 0) return "--";
-  return `${Math.round(ageMs)}ms`;
-}
-
-function updateHudMetrics() {
-  wsVal.textContent = wsHudState;
-  rttVal.textContent = lastPingRttMs === null ? "--" : `${Math.round(lastPingRttMs)}ms`;
-  if (!lastFrameDrawAt) {
-    videoAgeVal.textContent = "--";
-    return;
-  }
-
-  const rawAgeMs = Date.now() - lastFrameDrawAt;
-  if (rawAgeMs >= 3000) {
-    videoAgeVal.textContent = "LOST";
-    return;
-  }
-
-  if (smoothedVideoAgeMs <= 0 || rawAgeMs < smoothedVideoAgeMs) {
-    smoothedVideoAgeMs = rawAgeMs;
-  } else {
-    smoothedVideoAgeMs = (smoothedVideoAgeMs * 0.82) + (rawAgeMs * 0.18);
-  }
-
-  const quantizedAgeMs = Math.round(smoothedVideoAgeMs / 25) * 25;
-  videoAgeVal.textContent = formatAgeMs(quantizedAgeMs);
-}
-
-function markFrameDrawn() {
-  lastFrameDrawAt = Date.now();
-  smoothedVideoAgeMs = 0;
-  updateHudMetrics();
-}
-
-function setWsHudState(nextState) {
-  wsHudState = nextState;
-  updateHudMetrics();
-}
-
-function syncSelectedDevice(devices) {
-  if (!Array.isArray(devices) || devices.length === 0 || pinnedDeviceId) return;
-  if (!devices.includes(deviceId)) {
-    deviceId = devices[0];
-    brokerQueuedFrame = null;
-    brokerFrameBusy = false;
-    lastFrameDrawAt = 0;
-    smoothedVideoAgeMs = 0;
-  }
-}
-
 function requestQuality(quality) {
   const nextIdx = qualityList.indexOf(quality);
   if (nextIdx >= 0) { resIdx = nextIdx; resLabel.textContent = quality; }
@@ -635,6 +619,10 @@ function getRemoteVideoUrl(id) {
   return `${location.origin}/video/${encodeURIComponent(id)}`;
 }
 
+function getBrokerStreamUrl() {
+  return `${getRemoteVideoUrl(deviceId)}?ts=${Date.now()}`;
+}
+
 function setStreamUrl(nextUrl) {
   if (nextUrl === streamUrl) return;
   const oldUrl = streamUrl;
@@ -643,14 +631,14 @@ function setStreamUrl(nextUrl) {
   if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
 }
 
-function setCanvasVideoMode(enabled) {
-  brokerCanvasActive = enabled;
-  streamEl.style.display = enabled ? "none" : "";
-  streamCanvas.classList.toggle("visible", enabled);
-  if (!enabled) {
-    brokerQueuedFrame = null;
-    brokerFrameBusy = false;
-  }
+function scheduleBrokerStreamReconnect(delayMs = 1200) {
+  if (apModeActive || !brokerStreamRequested) return;
+  window.clearTimeout(brokerStreamRetryTimer);
+  brokerStreamRetryTimer = window.setTimeout(() => {
+    if (!brokerStreamRequested || !deviceId) return;
+    setStreamUrl("");
+    setStreamUrl(getBrokerStreamUrl());
+  }, delayMs);
 }
 
 async function drawApFrame(blob) {
@@ -662,14 +650,58 @@ async function drawApFrame(blob) {
   }
   streamCanvasCtx.drawImage(bitmap, 0, 0, streamCanvas.width, streamCanvas.height);
   bitmap.close();
-  markFrameDrawn();
   return true;
+}
+
+function drawBrokerFrame() {
+  if (!streamEl.naturalWidth || !streamEl.naturalHeight) {
+    return false;
+  }
+  if (streamCanvas.width !== streamEl.naturalWidth || streamCanvas.height !== streamEl.naturalHeight) {
+    streamCanvas.width = streamEl.naturalWidth;
+    streamCanvas.height = streamEl.naturalHeight;
+  }
+  try {
+    streamCanvasCtx.drawImage(streamEl, 0, 0, streamCanvas.width, streamCanvas.height);
+    brokerLastFrameAt = Date.now();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startBrokerVideoLoop() {
+  if (apModeActive || brokerVideoLoopActive) return;
+  brokerVideoLoopActive = true;
+  streamEl.classList.add("feed-only");
+  streamCanvas.classList.add("visible");
+
+  const tick = () => {
+    if (apModeActive || !brokerVideoLoopActive) {
+      brokerVideoLoopActive = false;
+      return;
+    }
+    if (brokerStreamRequested) {
+      drawBrokerFrame();
+      if (brokerLastFrameAt && Date.now() - brokerLastFrameAt > 2500) {
+        brokerStreamActive = false;
+        connLabel.textContent = "stream retry";
+        updateStreamButton();
+        scheduleBrokerStreamReconnect(700);
+      }
+    }
+    window.requestAnimationFrame(tick);
+  };
+
+  window.requestAnimationFrame(tick);
 }
 
 async function startApVideoLoop() {
   if (apVideoLoopActive) return;
   apVideoLoopActive = true;
-  setCanvasVideoMode(true);
+  streamEl.classList.remove("feed-only");
+  streamEl.style.display = "none";
+  streamCanvas.classList.add("visible");
 
   while (apModeActive) {
     try {
@@ -693,142 +725,194 @@ async function startApVideoLoop() {
 }
 
 // broker WebSocket 연결
-function stopWsHeartbeat() {
-  if (wsPingTimer) {
-    clearInterval(wsPingTimer);
-    wsPingTimer = 0;
-  }
-}
-
-function startWsHeartbeat() {
-  stopWsHeartbeat();
-  wsPingTimer = setInterval(() => {
-    if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) return;
-    lastPingSentAt = performance.now();
-    ws.send(JSON.stringify({ type: "ping" }));
-  }, WS_PING_INTERVAL_MS);
-}
-
 function connectWS() {
   if (!brokerUrl) return;
-  setWsHudState("OPENING");
   ws = new WebSocket(brokerUrl);
-  ws.binaryType = "blob";
   ws.onopen = () => {
     wsReady = true;
-    setWsHudState("OPEN");
     connLabel.textContent = "broker on";
-    startWsHeartbeat();
+    updateStreamButton();
   };
   ws.onclose = () => {
-    wsReady = false; connLabel.textContent = "reconnecting";
-    setWsHudState("RETRY");
-    stopWsHeartbeat();
-    setCanvasVideoMode(false);
-    setStreamUrl(""); setTimeout(connectWS, 1500);
-  };
-  ws.onerror = () => { connLabel.textContent = "socket error"; setWsHudState("ERR"); };
-  ws.onmessage = async (event) => {
-    if (typeof event.data === "string") {
-      try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
-      return;
+    wsReady = false;
+    if (brokerPingTimer) {
+      window.clearInterval(brokerPingTimer);
+      brokerPingTimer = 0;
     }
-    await handleBrokerBinary(event.data);
-  };
-}
-
-async function drawBrokerFrame(blob) {
-  if (!blob || blob.size < 1024) return;
-  setCanvasVideoMode(true);
-  const bitmap = await createImageBitmap(blob);
-  if (streamCanvas.width !== bitmap.width || streamCanvas.height !== bitmap.height) {
-    streamCanvas.width = bitmap.width;
-    streamCanvas.height = bitmap.height;
-  }
-  streamCanvasCtx.drawImage(bitmap, 0, 0, streamCanvas.width, streamCanvas.height);
-  bitmap.close();
-  markFrameDrawn();
-}
-
-async function flushBrokerFrameQueue() {
-  if (brokerFrameBusy || !brokerQueuedFrame) return;
-  brokerFrameBusy = true;
-  const nextFrame = brokerQueuedFrame;
-  brokerQueuedFrame = null;
-  try {
-    await drawBrokerFrame(nextFrame);
-  } catch {
-    connLabel.textContent = "video retry";
-  } finally {
-    brokerFrameBusy = false;
-    if (brokerQueuedFrame) {
-      queueMicrotask(flushBrokerFrameQueue);
+    brokerDeviceOnline = false;
+    brokerStreamActive = false;
+    brokerStreamRequested = false;
+    brokerTalkActive = false;
+    talkTransition = null;
+    setTalkUiActive(false);
+    for (const commandType of [...pendingCommandAcks.keys()]) {
+      clearPendingCommandAck(commandType, false);
     }
+    brokerLastFrameAt = 0;
+    connLabel.textContent = "reconnecting";
+    setStreamUrl("");
+    updateStreamButton();
+    setTimeout(connectWS, 1500);
+  };
+  ws.onerror = () => {
+    connLabel.textContent = "socket error";
+    updateStreamButton();
+  };
+  ws.onmessage = (event) => {
+    try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
+  };
+  if (!brokerPingTimer) {
+    brokerPingTimer = window.setInterval(() => {
+      if (wsReady && ws && ws.readyState === WebSocket.OPEN) {
+        send({ type: "ping" });
+      }
+    }, 10000);
   }
-}
-
-async function handleBrokerBinary(frameBlob) {
-  const packet = await frameBlob.arrayBuffer();
-  const view = new DataView(packet);
-  if (view.byteLength < 4 || view.getUint8(0) !== 1) return;
-  const deviceIdLen = view.getUint16(1);
-  const frameStart = 3 + deviceIdLen;
-  if (view.byteLength <= frameStart) return;
-  const packetDeviceId = new TextDecoder().decode(new Uint8Array(packet, 3, deviceIdLen));
-  if (packetDeviceId !== deviceId) return;
-  brokerQueuedFrame = new Blob([packet.slice(frameStart)], { type: "image/jpeg" });
-  flushBrokerFrameQueue();
 }
 
 function handleBrokerMessage(message) {
   if (message.type === "welcome") {
-    syncSelectedDevice(message.devices);
     if (Array.isArray(message.devices) && message.devices.length > 0) {
-      connLabel.textContent = "device online";
-      setCanvasVideoMode(true);
-      ensureDefaultQuality();
+      if (!message.devices.includes(deviceId)) deviceId = message.devices[0];
+      brokerDeviceOnline = true;
+      connLabel.textContent = "device ready";
     } else {
       connLabel.textContent = "connected";
     }
+    updateStreamButton();
     return;
   }
-  if (message.type === "device_online" && !pinnedDeviceId && !lastFrameDrawAt) {
-    deviceId = message.deviceId;
-  }
   if (message.type === "device_online" && message.deviceId === deviceId) {
-    connLabel.textContent = "device online";
-    setCanvasVideoMode(true);
-    ensureDefaultQuality();
+    brokerDeviceOnline = true;
+    connLabel.textContent = "device ready";
+    updateStreamButton();
     return;
   }
   if (message.type === "device_offline" && message.deviceId === deviceId) {
+    brokerDeviceOnline = false;
+    brokerStreamActive = false;
+    brokerStreamRequested = false;
+    brokerTalkActive = false;
+    setTalkUiActive(false);
     connLabel.textContent = "device offline";
-    setCanvasVideoMode(false);
     setStreamUrl("");
+    updateStreamButton();
     return;
   }
   if (message.type === "status" && message.deviceId === deviceId) {
+    brokerDeviceOnline = true;
+    brokerStreamActive = Boolean(message.streamEnabled);
+    brokerTalkActive = Boolean(message.talkEnabled);
     if (typeof message.batteryPct === "number") batVal.textContent = `${message.batteryPct}%`;
     else if (typeof message.batteryMv === "number") batVal.textContent = `${(message.batteryMv/1000).toFixed(2)}V`;
     const sig = signalPercentFromRssi(message.rssi);
     rssiVal.textContent = sig !== null ? `${sig}%` : "--%";
-    if (!apModeActive) setCanvasVideoMode(true);
+    if (brokerTalkActive) {
+      connLabel.textContent = "ptt active";
+      setTalkUiActive(true);
+      setStreamUrl("");
+      brokerLastFrameAt = 0;
+    } else if (brokerStreamActive) {
+      connLabel.textContent = "streaming";
+      setTalkUiActive(false);
+      if (!streamUrl) {
+        if (message.remoteVideoUrl) setStreamUrl(`${location.origin}${message.remoteVideoUrl}?ts=${Date.now()}`);
+        else if (message.localIp && message.streamPath) setStreamUrl(`http://${message.localIp}${message.streamPath}?ts=${Date.now()}`);
+      }
+      startBrokerVideoLoop();
+      ensureDefaultQuality();
+    } else if (!brokerStreamRequested) {
+      setTalkUiActive(false);
+      connLabel.textContent = "device ready";
+      setStreamUrl("");
+      brokerLastFrameAt = 0;
+    }
+    updateStreamButton();
     return;
   }
-  if (message.type === "pong" || message.type === "broker_status") {
-    if (message.type === "broker_status") {
-      syncSelectedDevice(message.devices);
-    }
-    if (message.type === "pong" && lastPingSentAt) {
-      lastPingRttMs = performance.now() - lastPingSentAt;
-      lastPingSentAt = 0;
-      updateHudMetrics();
-    }
+  if (message.type === "command_ack" && message.deviceId === deviceId) {
+    clearPendingCommandAck(String(message.commandType || ""), true);
+    return;
+  }
+  if (message.type === "command_drop") {
+    clearPendingCommandAck(String(message.commandType || ""), false);
+    connLabel.textContent = String(message.reason || "command dropped");
+    return;
+  }
+  if (message.type === "error") {
+    connLabel.textContent = String(message.reason || "broker error");
     return;
   }
   if (message.type === "audio" && message.deviceId === deviceId) {
     playAudioChunk(message);
   }
+}
+
+function toggleStream() {
+  if (apModeActive || !wsReady || !brokerDeviceOnline) return;
+  const nextEnabled = !brokerStreamActive && !brokerStreamRequested;
+  brokerStreamRequested = nextEnabled;
+  brokerStreamActive = false;
+  if (!nextEnabled) {
+    window.clearTimeout(brokerStreamRetryTimer);
+    setStreamUrl("");
+    brokerLastFrameAt = 0;
+    connLabel.textContent = "stream stopped";
+  } else {
+    connLabel.textContent = "stream starting";
+    brokerLastFrameAt = 0;
+    setStreamUrl(getBrokerStreamUrl());
+    startBrokerVideoLoop();
+    scheduleBrokerStreamReconnect(2500);
+  }
+  updateStreamButton();
+  send({ type: "stream", deviceId, enabled: nextEnabled });
+}
+
+function requestBrokerStream(enabled, reasonText = "") {
+  if (apModeActive || !wsReady || !brokerDeviceOnline) return false;
+  brokerStreamRequested = Boolean(enabled);
+  if (!enabled) {
+    window.clearTimeout(brokerStreamRetryTimer);
+    brokerStreamActive = false;
+    setStreamUrl("");
+    brokerLastFrameAt = 0;
+  } else {
+    brokerLastFrameAt = 0;
+    setStreamUrl(getBrokerStreamUrl());
+    startBrokerVideoLoop();
+    scheduleBrokerStreamReconnect(2500);
+  }
+  if (reasonText) {
+    connLabel.textContent = reasonText;
+  }
+  updateStreamButton();
+  return send({ type: "stream", deviceId, enabled: Boolean(enabled) });
+}
+
+async function requestBrokerStreamWithAck(enabled, reasonText = "") {
+  if (apModeActive || !wsReady || !brokerDeviceOnline) return false;
+  brokerStreamRequested = Boolean(enabled);
+  if (!enabled) {
+    window.clearTimeout(brokerStreamRetryTimer);
+    brokerStreamActive = false;
+    setStreamUrl("");
+    brokerLastFrameAt = 0;
+  } else {
+    brokerLastFrameAt = 0;
+    setStreamUrl(getBrokerStreamUrl());
+    startBrokerVideoLoop();
+    scheduleBrokerStreamReconnect(2500);
+  }
+  if (reasonText) connLabel.textContent = reasonText;
+  updateStreamButton();
+  return sendBrokerCommandWithAck("stream", { type: "stream", deviceId, enabled: Boolean(enabled) });
+}
+
+async function requestBrokerTalkWithAck(enabled, reasonText = "") {
+  if (apModeActive || !wsReady || !brokerDeviceOnline) return false;
+  if (reasonText) connLabel.textContent = reasonText;
+  return sendBrokerCommandWithAck("talk", { type: "talk", deviceId, enabled: Boolean(enabled) });
 }
 
 function cycleResolution() {
@@ -854,12 +938,7 @@ async function doSnap() {
   btnSnap.classList.add("active");
   const restoreQuality = qualityList[resIdx];
   try {
-    const useCanvasVideo = apModeActive || brokerCanvasActive;
-    if (useCanvasVideo) {
-      if (!(streamCanvas.width > 0 && streamCanvas.height > 0)) return;
-    } else if (!streamEl.src) {
-      return;
-    }
+    if (!streamEl.src) return;
     if (restoreQuality !== "UXGA") { requestQuality("UXGA"); await wait(1400); }
     if (apModeActive) {
       const res = await fetch(`${ESP32_BASE}/jpg?snap=${Date.now()}`, { cache: "no-store" });
@@ -870,10 +949,10 @@ async function doSnap() {
       a.href = url; a.download = `rc-snap-${new Date().toISOString().replace(/[:.]/g,"-")}.jpg`;
       a.click(); URL.revokeObjectURL(url);
     } else {
-      snapshotCanvas.width = useCanvasVideo ? (streamCanvas.width || 1280) : (streamEl.naturalWidth || 1280);
-      snapshotCanvas.height = useCanvasVideo ? (streamCanvas.height || 720) : (streamEl.naturalHeight || 720);
+      snapshotCanvas.width = streamEl.naturalWidth || 1280;
+      snapshotCanvas.height = streamEl.naturalHeight || 720;
       const ctx = snapshotCanvas.getContext("2d");
-      ctx.drawImage(useCanvasVideo ? streamCanvas : streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+      ctx.drawImage(streamEl, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
       snapshotCanvas.toBlob((blob) => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
@@ -897,10 +976,6 @@ let savedPasswords = {}; // {ssid: password} — ESP32에서 내려줌
 let scanResults = [];
 
 function openWifiPanel() {
-  if (!apModeActive) {
-    connLabel.textContent = "AP mode only";
-    return;
-  }
   document.getElementById("wifi-overlay").classList.add("open");
   document.getElementById("broker-hint").style.display = "block";
   setWifiStatus("");
@@ -964,17 +1039,16 @@ function renderScanList() {
         ${net.secure ? '<span class="wifi-lock">🔒</span>' : ""}
         <span>${net.rssi ?? ""}dBm</span>
       </span>`;
-    div.addEventListener("click", (event) => selectSsid(net.ssid, net.secure, hasSaved, event));
+    div.addEventListener("click", () => selectSsid(net.ssid, net.secure, hasSaved));
     list.appendChild(div);
   }
 }
 
-function selectSsid(ssid, secure, hasSaved, event) {
+function selectSsid(ssid, secure, hasSaved) {
   selectedSsid = ssid;
-  selectedSsidSecure = secure;
   // 기존 selected 해제
   document.querySelectorAll(".wifi-item").forEach(el => el.classList.remove("selected"));
-  event?.currentTarget?.classList.add("selected");
+  event.currentTarget.classList.add("selected");
 
   const pwRow = document.getElementById("wifi-pw-row");
   const pwInput = document.getElementById("wifi-pw-input");
@@ -1019,16 +1093,16 @@ async function doWifiConnect() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ssid: selectedSsid,
-        password: password,
-        secure: selectedSsidSecure
+        password: password
       })
     });
     const data = await res.json();
     if (data.ok) {
-      setWifiStatus("✅ 저장 완료. 브로커 모드로 전환 중입니다...", "ok");
-      connectBtn.textContent = "전환 중...";
+      setWifiStatus("✅ 저장 완료. ESP32가 재부팅됩니다...", "ok");
+      connectBtn.textContent = "재부팅 중...";
       setTimeout(() => {
-        setWifiStatus("전환 후 브로커 페이지에서 다시 접속하세요", "ok");
+        // 재부팅 후 브로커 URL로 안내 (broker host 알 수 없으므로 안내만)
+        setWifiStatus("재부팅 완료 후 브로커 네트워크에서 접속하세요", "ok");
         closeWifiPanel();
       }, 4000);
     } else {
@@ -1173,13 +1247,14 @@ function flushTalkSamples(force = false) {
       talkAudioState.uploadQueue.push({
         codec: "adpcm_ima", sampleRate: talkAudioState.targetSampleRate,
         samples: chunk.length, seq: talkAudioState.seq++,
-        payload: encodeBytesToBase64(encoded)
+        payload: encodeBytesToBase64(encoded),
+        sentAt: Date.now()
       });
       drainTalkUploadQueue();
     } else {
       send({ type: "talk_audio", deviceId, codec: "adpcm_ima",
         sampleRate: talkAudioState.targetSampleRate, samples: chunk.length,
-        seq: talkAudioState.seq++, payload: encodeBytesToBase64(encoded) });
+        seq: talkAudioState.seq++, payload: encodeBytesToBase64(encoded), sentAt: Date.now() });
     }
     talkAudioState.sentChunks++;
   }
@@ -1201,6 +1276,10 @@ async function stopTalkCapture() {
 
 async function ensureTalkCapture() {
   if (talkAudioState.processor) return true;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    lastTalkError = describeTalkCaptureError(null);
+    return false;
+  }
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   try {
     talkAudioState.ctx = new AudioContextCtor();
@@ -1225,8 +1304,10 @@ async function ensureTalkCapture() {
     talkAudioState.source.connect(talkAudioState.processor);
     talkAudioState.processor.connect(talkAudioState.muteGain);
     talkAudioState.muteGain.connect(talkAudioState.ctx.destination);
+    lastTalkError = "";
     return true;
-  } catch {
+  } catch (error) {
+    lastTalkError = describeTalkCaptureError(error);
     await stopTalkCapture(); return false;
   }
 }
@@ -1343,23 +1424,53 @@ function resumeApMediaAfterTalk() {
 // TALK
 // ============================================================
 async function talkStart() {
-  if (talkOn) return;
+  if (talkOn || talkTransition === "starting") return;
+  talkTransition = "starting";
+  lastTalkError = "";
   if (apModeActive) pauseApMediaForTalk();
   stopAudioPlayback();
   armAudioPlayback();
   const ok = await ensureTalkCapture();
   if (!ok) {
     if (apModeActive) resumeApMediaAfterTalk();
+    if (lastTalkError) connLabel.textContent = lastTalkError;
+    talkTransition = null;
     return;
   }
-  talkOn = true;
-  talkAudioState.sentChunks = 0;
-  setButtonState(btnTalk, true);
   if (apModeActive) {
+    talkOn = true;
+    talkAudioState.sentChunks = 0;
+    setTalkUiActive(true);
     apPost("/api/control", { talk: true });
   } else {
-    send({ type: "talk", deviceId, enabled: true });
+    resumeStreamAfterTalk = brokerStreamActive || brokerStreamRequested;
+    if (resumeStreamAfterTalk) {
+      const paused = await requestBrokerStreamWithAck(false, "ptt pause");
+      if (!paused) {
+        await stopTalkCapture();
+        talkTransition = null;
+        connLabel.textContent = "ptt pause failed";
+        return;
+      }
+    }
+    const talkStarted = await requestBrokerTalkWithAck(true, "ptt start");
+    if (!talkStarted) {
+      await stopTalkCapture();
+      if (resumeStreamAfterTalk) {
+        await requestBrokerStreamWithAck(true, "stream resuming");
+        resumeStreamAfterTalk = false;
+      }
+      talkTransition = null;
+      connLabel.textContent = "ptt start failed";
+      return;
+    }
+    brokerTalkActive = true;
+    talkOn = true;
+    talkAudioState.sentChunks = 0;
+    setTalkUiActive(true);
+    connLabel.textContent = "ptt active";
   }
+  talkTransition = null;
 }
 
 function beginTalkPress(event) {
@@ -1373,17 +1484,24 @@ function beginTalkPress(event) {
 }
 
 async function talkEnd() {
-  if (!talkOn) return;
+  if ((!talkOn && talkTransition !== "starting") || talkTransition === "stopping") return;
+  talkTransition = "stopping";
   talkOn = false;
   talkPointerId = null;
-  setButtonState(btnTalk, false);
+  setTalkUiActive(false);
   if (apModeActive) {
     apPost("/api/control", { talk: false });
   } else {
-    send({ type: "talk", deviceId, enabled: false });
+    await requestBrokerTalkWithAck(false, "ptt stop");
+    brokerTalkActive = false;
   }
   await stopTalkCapture();
   if (apModeActive) resumeApMediaAfterTalk();
+  if (!apModeActive && resumeStreamAfterTalk) {
+    await requestBrokerStreamWithAck(true, "stream resuming");
+    resumeStreamAfterTalk = false;
+  }
+  talkTransition = null;
 }
 
 // ============================================================
@@ -1391,21 +1509,20 @@ async function talkEnd() {
 // ============================================================
 async function toggleRec() {
   if (recOn) { recorderState.recorder?.stop(); return; }
-  const useCanvasVideo = apModeActive || brokerCanvasActive;
-  const videoSource = useCanvasVideo ? streamCanvas : streamEl;
-  const hasVideo = useCanvasVideo
+  const videoSource = apModeActive ? streamCanvas : streamEl;
+  const hasVideo = apModeActive
     ? (streamCanvas.width > 0 && streamCanvas.height > 0)
     : !!streamEl.src;
   if (!hasVideo) return;
   try {
-    const width = useCanvasVideo
+    const width = apModeActive
       ? (streamCanvas.width || 640)
       : (streamEl.naturalWidth || 640);
-    const height = useCanvasVideo
+    const height = apModeActive
       ? (streamCanvas.height || 480)
       : (streamEl.naturalHeight || 480);
 
-    if (useCanvasVideo) {
+    if (apModeActive) {
       recorderState.stream = streamCanvas.captureStream(12);
     } else {
       snapshotCanvas.width = width; snapshotCanvas.height = height;
@@ -1499,6 +1616,7 @@ window.addEventListener("mouseup", () => { if (joystickActive) joystickReset(); 
 // 버튼 이벤트
 // ============================================================
 btnLed.addEventListener("click", () => { armAudioPlayback(); toggleLed(); });
+btnStream.addEventListener("click", () => { armAudioPlayback(); toggleStream(); });
 btnNet.addEventListener("click", () => { armAudioPlayback(); openWifiPanel(); });
 btnSnap.addEventListener("click", () => { armAudioPlayback(); doSnap(); });
 btnTalk.addEventListener("pointerdown", beginTalkPress);
@@ -1512,36 +1630,61 @@ btnTalk.addEventListener("pointerleave", talkEnd);
 btnTalk.addEventListener("lostpointercapture", talkEnd);
 btnTalk.addEventListener("contextmenu", (event) => event.preventDefault());
 btnRec.addEventListener("click", () => { armAudioPlayback(); toggleRec(); });
+streamEl.addEventListener("load", () => {
+  if (apModeActive) return;
+  if (brokerStreamRequested) {
+    brokerStreamActive = true;
+    brokerLastFrameAt = Date.now();
+    connLabel.textContent = "streaming";
+    drawBrokerFrame();
+    updateStreamButton();
+  }
+});
+streamEl.addEventListener("error", () => {
+  if (apModeActive || !brokerStreamRequested) return;
+  brokerStreamActive = false;
+  connLabel.textContent = "stream retry";
+  updateStreamButton();
+  scheduleBrokerStreamReconnect(1000);
+});
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { talkEnd(); setCanvasVideoMode(false); setStreamUrl(""); releaseWakeLock(); }
-  else { requestWakeLock(); }
+  if (document.hidden) { talkEnd(); setStreamUrl(""); releaseWakeLock(); }
+  else {
+    requestWakeLock();
+    if (!apModeActive && deviceId && brokerStreamRequested) {
+      setStreamUrl(getBrokerStreamUrl());
+      startBrokerVideoLoop();
+      scheduleBrokerStreamReconnect(1500);
+    }
+  }
 });
 window.addEventListener("pointerup", talkEnd);
 window.addEventListener("blur", talkEnd);
-window.addEventListener("pagehide", () => { talkEnd(); setCanvasVideoMode(false); setStreamUrl(""); releaseWakeLock(); });
+window.addEventListener("pagehide", () => { talkEnd(); setStreamUrl(""); releaseWakeLock(); });
 
 // ============================================================
 // 초기화
 // ============================================================
 if (isApOrLocal) {
   // AP / 로컬 STA 모드
-  document.body.classList.add("ap-setup-only");
-  setWsHudState("AP");
-  connLabel.textContent = "SETUP";
-  resLabel.textContent = "SETUP";
+  connLabel.textContent = "AP 모드";
+  resLabel.textContent = DEFAULT_CAMERA_QUALITY;
+  ensureDefaultQuality();
+  startApVideoLoop();
   startApStatusPoll();
-  setTimeout(openWifiPanel, 250);
+  startApAudioWs();
+  updateStreamButton();
 } else {
   // broker 모드
   apBanner.classList.remove("visible");
   resLabel.textContent = DEFAULT_CAMERA_QUALITY;
-  setWsHudState("OFF");
+  streamEl.style.display = "block";
+  streamEl.classList.add("feed-only");
+  streamCanvas.classList.add("visible");
+  updateStreamButton();
   connectWS();
 }
-
-hudTimer = window.setInterval(updateHudMetrics, 250);
-updateHudMetrics();
 </script>
 </body>
 </html>

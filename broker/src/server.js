@@ -1,290 +1,482 @@
 const fs = require("fs");
 const http = require("http");
+const https = require("https");
 const path = require("path");
 const { WebSocketServer } = require("ws");
 const config = require("./config");
 
-const clients = new Map();   // clientId -> { ws, clientId, lastSeenAt }
-const devices = new Map();   // deviceId -> { ws, deviceId, lastSeenAt, latestFrame, streamClients }
+const clients = new Map();
+const devices = new Map();
 
-const VIDEO_FRAME_MSG = 1;
-
-function sendJson(ws, payload) {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
-}
-function now() { return Date.now(); }
-function clamp(v, lo, hi) { return Math.min(Math.max(v, lo), hi); }
-
-function readFile(p) {
-  try { return fs.readFileSync(p); } catch { return null; }
+function sendJson(socket, payload) {
+  if (socket.readyState === socket.OPEN) {
+    socket.send(JSON.stringify(payload));
+  }
 }
 
-// ─── MJPEG 스트림 (브라우저 직접 접속용) ───
-function getVideoDeviceId(url) {
-  const m = new URL(url, "http://x").pathname.match(/^\/video\/([^/]+)$/);
-  return m ? decodeURIComponent(m[1]) : null;
+function now() {
+  return Date.now();
 }
-function writeMjpegFrame(res, buf) {
-  res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
-  res.write(buf);
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function readStaticFile(filePath) {
+  try {
+    return fs.readFileSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function getVideoDeviceId(reqUrl) {
+  const parsed = new URL(reqUrl, "http://localhost");
+  const match = parsed.pathname.match(/^\/video\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function writeMjpegFrame(res, frameBuffer) {
+  res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frameBuffer.length}\r\n\r\n`);
+  res.write(frameBuffer);
   res.write("\r\n");
 }
-function attachMjpeg(entry, res) {
+
+function attachVideoClient(deviceEntry, res) {
+  if (!deviceEntry.streamClients) {
+    deviceEntry.streamClients = new Set();
+  }
+
   res.writeHead(200, {
     "Content-Type": "multipart/x-mixed-replace; boundary=frame",
     "Cache-Control": "no-cache, no-store, must-revalidate",
     "Access-Control-Allow-Origin": "*",
-    "Connection": "close",
-    "Pragma": "no-cache"
+    Connection: "close",
+    Pragma: "no-cache"
   });
-  if (entry.latestFrame) writeMjpegFrame(res, entry.latestFrame);
-  entry.streamClients.add(res);
-  const cleanup = () => entry.streamClients.delete(res);
-  res.on("close", cleanup);
-  res.on("finish", cleanup);
+
+  if (deviceEntry.latestFrame) {
+    writeMjpegFrame(res, deviceEntry.latestFrame);
+  }
+
+  deviceEntry.streamClients.add(res);
+  reqCleanup(res, () => {
+    deviceEntry.streamClients.delete(res);
+  });
 }
 
-// ─── 정적 파일 ───
+function reqCleanup(res, cleanup) {
+  const done = () => cleanup();
+  res.on("close", done);
+  res.on("finish", done);
+}
+
+function broadcastFrame(deviceEntry, frameBuffer) {
+  deviceEntry.latestFrame = frameBuffer;
+  if (!deviceEntry.streamClients) {
+    return;
+  }
+
+  for (const res of [...deviceEntry.streamClients]) {
+    try {
+      writeMjpegFrame(res, frameBuffer);
+    } catch {
+      deviceEntry.streamClients.delete(res);
+      try {
+        res.end();
+      } catch {}
+    }
+  }
+}
+
 function serveStatic(req, res) {
   const urlPath = req.url === "/" ? "/index.html" : req.url;
-  const safe    = path.normalize(urlPath).replace(/^(\.\.[\\/])+/, "");
-  const content = readFile(path.join(config.publicWebDir, safe));
+  const safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, "");
+  const filePath = path.join(config.publicWebDir, safePath);
+  const content = readStaticFile(filePath);
+
   if (!content) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    return res.end("Not found");
+    res.end("Not found");
+    return;
   }
-  const ext = path.extname(safe);
-  const ct  = ext === ".html" ? "text/html; charset=utf-8"
-             : ext === ".js"  ? "application/javascript; charset=utf-8"
-             :                  "text/plain; charset=utf-8";
-  res.writeHead(200, { "content-type": ct, "Cache-Control": "no-cache, no-store, must-revalidate" });
+
+  const ext = path.extname(filePath);
+  const contentType =
+    ext === ".html"
+      ? "text/html; charset=utf-8"
+      : ext === ".js"
+        ? "application/javascript; charset=utf-8"
+        : "text/plain; charset=utf-8";
+
+  res.writeHead(200, {
+    "content-type": contentType,
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    Pragma: "no-cache",
+    Expires: "0"
+  });
   res.end(content);
 }
 
-// ─── HTTP 서버 ───
-const server = http.createServer((req, res) => {
-  const deviceId = getVideoDeviceId(req.url);
-  if (deviceId) {
-    const entry = devices.get(deviceId);
-    if (!entry) { res.writeHead(404, {"content-type":"text/plain"}); return res.end("device not found"); }
-    return attachMjpeg(entry, res);
-  }
-  serveStatic(req, res);
-});
+function createHttpHandler(req, res) {
+  const videoDeviceId = getVideoDeviceId(req.url);
+  if (videoDeviceId) {
+    const deviceEntry = getDevice(videoDeviceId);
+    if (!deviceEntry) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("device not found");
+      return;
+    }
 
-// ─── WebSocket 서버 (device / client 분리) ───
+    attachVideoClient(deviceEntry, res);
+    return;
+  }
+
+  serveStatic(req, res);
+}
+
+function createBrokerServer() {
+  if (!config.tlsEnabled) {
+    return {
+      server: http.createServer(createHttpHandler),
+      protocol: "http"
+    };
+  }
+
+  const tlsOptions = {
+    key: fs.readFileSync(config.tlsKeyPath),
+    cert: fs.readFileSync(config.tlsCertPath)
+  };
+
+  return {
+    server: https.createServer(tlsOptions, createHttpHandler),
+    protocol: "https"
+  };
+}
+
+const { server, protocol } = createBrokerServer();
+
 const deviceWss = new WebSocketServer({ noServer: true });
 const clientWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(req.url, "http://x");
-  if (url.pathname === config.devicePath) {
-    deviceWss.handleUpgrade(req, socket, head, ws => deviceWss.emit("connection", ws, req));
-  } else if (url.pathname === config.clientPath) {
-    clientWss.handleUpgrade(req, socket, head, ws => clientWss.emit("connection", ws, req));
-  } else {
-    socket.destroy();
+  const requestUrl = new URL(req.url, "http://localhost");
+
+  if (requestUrl.pathname === config.devicePath) {
+    deviceWss.handleUpgrade(req, socket, head, (ws) => {
+      deviceWss.emit("connection", ws, req);
+    });
+    return;
   }
+
+  if (requestUrl.pathname === config.clientPath) {
+    clientWss.handleUpgrade(req, socket, head, (ws) => {
+      clientWss.emit("connection", ws, req);
+    });
+    return;
+  }
+
+  socket.destroy();
 });
 
-// ─── 헬퍼 ───
 function broadcastToClients(payload) {
-  for (const e of clients.values()) sendJson(e.ws, payload);
-}
-
-function notifyClientState() {
-  const payload = { type: "client_state", clients: clients.size, ts: now() };
-  for (const e of devices.values()) sendJson(e.ws, payload);
-}
-
-function encodeVideoMsg(deviceId, frame) {
-  const idBuf = Buffer.from(deviceId, "utf8");
-  const out   = Buffer.allocUnsafe(1 + 2 + idBuf.length + frame.length);
-  out.writeUInt8(VIDEO_FRAME_MSG, 0);
-  out.writeUInt16BE(idBuf.length, 1);
-  idBuf.copy(out, 3);
-  frame.copy(out, 3 + idBuf.length);
-  return out;
-}
-function sendVideoFrame(ws, deviceId, frame) {
-  if (ws.readyState === ws.OPEN)
-    ws.send(encodeVideoMsg(deviceId, frame), { binary: true });
-}
-function broadcastFrame(entry, frame) {
-  entry.latestFrame = frame;
-  // WS 클라이언트에 바이너리 전송
-  for (const e of clients.values()) sendVideoFrame(e.ws, entry.deviceId, frame);
-  // MJPEG 스트림 클라이언트에 전송
-  for (const res of [...entry.streamClients]) {
-    try { writeMjpegFrame(res, frame); }
-    catch { entry.streamClients.delete(res); try { res.end(); } catch {} }
+  for (const client of clients.values()) {
+    sendJson(client.ws, payload);
   }
 }
 
-function getDevice(id)    { return devices.get(id); }
-function primaryDevice()  { return devices.values().next().value || null; }
-function resolveDevice(m) { return (m.deviceId && getDevice(m.deviceId)) || primaryDevice(); }
-
-function fwdCmd(ws, msg, payload) {
-  const d = resolveDevice(msg);
-  if (!d) { sendJson(ws, { type: "error", reason: "no_device" }); return; }
-  sendJson(d.ws, payload);
-  sendJson(ws, { type: "command_ack", commandType: payload.type, deviceId: d.deviceId, ts: now() });
-}
-function fwdAudio(ws, msg, payload) {
-  const d = resolveDevice(msg);
-  if (!d) { sendJson(ws, { type: "error", reason: "no_device" }); return; }
-  sendJson(d.ws, payload);
+function broadcastAudioToClients(payload) {
+  for (const client of clients.values()) {
+    if (client.ws.readyState === client.ws.OPEN) {
+      client.ws.send(JSON.stringify(payload));
+    }
+  }
 }
 
-function pruneStale() {
-  const t = now();
-  for (const [id, e] of devices.entries()) {
-    if (t - e.lastSeenAt > config.staleDeviceMs) {
-      e.ws.close(4000, "device timeout");
+function getDevice(deviceId) {
+  return devices.get(deviceId);
+}
+
+function getPrimaryDevice() {
+  return devices.values().next().value || null;
+}
+
+function resolveTargetDevice(message) {
+  return (message.deviceId && getDevice(message.deviceId)) || getPrimaryDevice();
+}
+
+function forwardClientCommand(ws, message, payload) {
+  const deviceEntry = resolveTargetDevice(message);
+  if (!deviceEntry) {
+    sendJson(ws, { type: "error", reason: "no_device_connected" });
+    return;
+  }
+
+  sendJson(deviceEntry.ws, payload);
+  sendJson(ws, {
+    type: "command_ack",
+    commandType: payload.type,
+    deviceId: deviceEntry.deviceId,
+    sentAt: now()
+  });
+}
+
+function forwardClientAudio(ws, message, payload) {
+  const deviceEntry = resolveTargetDevice(message);
+  if (!deviceEntry) {
+    sendJson(ws, { type: "error", reason: "no_device_connected" });
+    return false;
+  }
+
+  sendJson(deviceEntry.ws, payload);
+  sendJson(ws, {
+    type: "command_ack",
+    commandType: payload.type,
+    deviceId: deviceEntry.deviceId,
+    sentAt: now()
+  });
+  return true;
+}
+
+function markAlive(entry) {
+  entry.lastSeenAt = now();
+}
+
+function closeStaleConnections() {
+  const current = now();
+
+  for (const [id, entry] of devices.entries()) {
+    if (current - entry.lastSeenAt > config.staleDeviceMs) {
+      entry.ws.close(4000, "device timeout");
       devices.delete(id);
       broadcastToClients({ type: "device_offline", deviceId: id });
-      console.log(`[device:${id}] stale, removed`);
     }
   }
-  for (const [id, e] of clients.entries()) {
-    if (t - e.lastSeenAt > config.staleClientMs) {
-      e.ws.close(4000, "client timeout");
+
+  for (const [id, entry] of clients.entries()) {
+    if (current - entry.lastSeenAt > config.staleClientMs) {
+      entry.ws.close(4000, "client timeout");
       clients.delete(id);
-      notifyClientState();
-      console.log(`[client:${id}] stale, removed`);
     }
   }
 }
 
-// ─── Device WebSocket ───
 deviceWss.on("connection", (ws, req) => {
-  const url      = new URL(req.url, "http://x");
-  const deviceId = url.searchParams.get("deviceId") || `esp32-${Math.random().toString(16).slice(2,8)}`;
-
-  // 핵심 버그 수정: 재연결 시 기존 streamClients 유지
-  const prev = devices.get(deviceId);
+  const url = new URL(req.url, "http://localhost");
+  const deviceId = url.searchParams.get("deviceId") || `esp32-${Math.random().toString(16).slice(2, 8)}`;
+  const existing = devices.get(deviceId);
+  const preservedStreamClients = existing && existing.streamClients ? existing.streamClients : new Set();
+  const preservedLatestFrame = existing && existing.latestFrame ? existing.latestFrame : null;
+  if (existing && existing.ws !== ws) {
+    try {
+      existing.ws.close(4001, "replaced");
+    } catch {}
+  }
   const entry = {
     ws,
     deviceId,
     lastSeenAt: now(),
-    latestFrame: prev ? prev.latestFrame : null,
-    streamClients: prev ? prev.streamClients : new Set()  // ← 기존 MJPEG 구독자 보존
+    latestFrame: preservedLatestFrame,
+    streamClients: preservedStreamClients
   };
+
   devices.set(deviceId, entry);
-
-  console.log(`[device:${deviceId}] connected (clients preserved: ${entry.streamClients.size})`);
-
   sendJson(ws, { type: "hello", role: "broker", heartbeatMs: config.heartbeatMs });
-  sendJson(ws, { type: "client_state", clients: clients.size, ts: now() });
   broadcastToClients({ type: "device_online", deviceId });
 
   ws.on("message", (raw, isBinary) => {
-    entry.lastSeenAt = now();
-    if (isBinary) { broadcastFrame(entry, Buffer.from(raw)); return; }
+    markAlive(entry);
 
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (isBinary) {
+      entry.videoFrameCount = (entry.videoFrameCount || 0) + 1;
+      if ((entry.videoFrameCount % 20) === 0) {
+        console.log(`[video:${deviceId}] frames=${entry.videoFrameCount} bytes=${raw.length}`);
+      }
+      broadcastFrame(entry, Buffer.from(raw));
+      return;
+    }
 
-    if (msg.type === "ping") {
+    let message;
+    try {
+      message = JSON.parse(raw.toString());
+    } catch {
+      sendJson(ws, { type: "error", reason: "invalid_json" });
+      return;
+    }
+
+    if (message.type === "ping") {
       sendJson(ws, { type: "pong", ts: now() });
-    } else if (msg.type === "status") {
-      broadcastToClients({ ...msg, deviceId, remoteVideoUrl: `/video/${encodeURIComponent(deviceId)}` });
-    } else if (msg.type === "audio") {
-      for (const e of clients.values()) sendJson(e.ws, { ...msg, deviceId });
-    } else if (msg.type === "log") {
-      broadcastToClients({ type: "device_log", deviceId, message: msg.message || "" });
+      return;
+    }
+
+    if (message.type === "status") {
+      broadcastToClients({
+        ...message,
+        deviceId,
+        remoteVideoUrl: `/video/${encodeURIComponent(deviceId)}`
+      });
+      return;
+    }
+
+    if (message.type === "audio") {
+      broadcastAudioToClients({
+        ...message,
+        deviceId
+      });
+      return;
+    }
+
+    if (message.type === "log") {
+      broadcastToClients({ type: "device_log", deviceId, message: message.message || "" });
     }
   });
 
   ws.on("close", () => {
-    // 같은 entry가 아닌 경우(재연결 경쟁) 무시
-    if (devices.get(deviceId) !== entry) return;
-    // streamClients는 건드리지 않음 (재연결 시 재사용)
-    devices.delete(deviceId);
-    broadcastToClients({ type: "device_offline", deviceId });
-    console.log(`[device:${deviceId}] disconnected`);
+    if (devices.get(deviceId) === entry) {
+      for (const res of entry.streamClients) {
+        try {
+          res.end();
+        } catch {}
+      }
+      devices.delete(deviceId);
+      broadcastToClients({ type: "device_offline", deviceId });
+    }
   });
-
-  ws.on("error", e => console.warn(`[device:${deviceId}] ws error: ${e.message}`));
 });
 
-// ─── Client WebSocket ───
-clientWss.on("connection", ws => {
-  const clientId = `client-${Math.random().toString(16).slice(2,8)}`;
-  const entry    = { ws, clientId, lastSeenAt: now() };
+clientWss.on("connection", (ws) => {
+  const clientId = `client-${Math.random().toString(16).slice(2, 8)}`;
+  const entry = { ws, clientId, lastSeenAt: now() };
   clients.set(clientId, entry);
-  notifyClientState();
 
-  sendJson(ws, { type: "welcome", clientId, devices: [...devices.keys()] });
+  sendJson(ws, {
+    type: "welcome",
+    clientId,
+    devices: [...devices.keys()]
+  });
 
-  // 신규 접속 즉시 최신 프레임 전송
-  for (const d of devices.values()) {
-    if (d.latestFrame) sendVideoFrame(ws, d.deviceId, d.latestFrame);
-  }
+  ws.on("message", (raw) => {
+    markAlive(entry);
 
-  ws.on("message", raw => {
-    entry.lastSeenAt = now();
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    let message;
+    try {
+      message = JSON.parse(raw.toString());
+    } catch {
+      sendJson(ws, { type: "error", reason: "invalid_json" });
+      return;
+    }
 
-    if (msg.type === "ping") {
+    if (message.type === "ping") {
       sendJson(ws, { type: "pong", ts: now() });
+      return;
+    }
 
-    } else if (msg.type === "ctrl") {
-      fwdCmd(ws, msg, {
+    if (message.type === "ctrl") {
+      const clientSentAt = Number(message.sentAt) || now();
+      if (now() - clientSentAt > config.ctrlMaxAgeMs) {
+        sendJson(ws, { type: "command_drop", commandType: "ctrl", reason: "stale_ctrl", ageMs: now() - clientSentAt });
+        return;
+      }
+      const payload = {
         type: "ctrl",
-        throttle: clamp(Number(msg.throttle)||0, -100, 100),
-        steering: clamp(Number(msg.steering)||0, -100, 100),
-        ts: now()
+        throttle: clamp(Number(message.throttle) || 0, -100, 100),
+        steering: clamp(Number(message.steering) || 0, -100, 100),
+        sentAt: clientSentAt,
+        relayedAt: now()
+      };
+      forwardClientCommand(ws, message, payload);
+      return;
+    }
+
+    if (message.type === "camera_quality") {
+      forwardClientCommand(ws, message, {
+        type: "camera_quality",
+        quality: String(message.quality || "QVGA").toUpperCase(),
+        sentAt: now()
       });
+      return;
+    }
 
-    } else if (msg.type === "camera_quality") {
-      fwdCmd(ws, msg, { type: "camera_quality", quality: String(msg.quality||"QVGA").toUpperCase(), ts: now() });
+    if (message.type === "led") {
+      forwardClientCommand(ws, message, {
+        type: "led",
+        enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
 
-    } else if (msg.type === "led") {
-      fwdCmd(ws, msg, { type: "led", enabled: Boolean(msg.enabled), ts: now() });
+    if (message.type === "mode") {
+      forwardClientCommand(ws, message, {
+        type: "mode",
+        mode: message.mode === "monitor" ? "monitor" : "drive",
+        sentAt: now()
+      });
+      return;
+    }
 
-    } else if (msg.type === "mode") {
-      fwdCmd(ws, msg, { type: "mode", mode: msg.mode==="monitor"?"monitor":"drive", ts: now() });
+    if (message.type === "talk") {
+      forwardClientCommand(ws, message, {
+        type: "talk",
+        enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
 
-    } else if (msg.type === "talk") {
-      fwdCmd(ws, msg, { type: "talk", enabled: Boolean(msg.enabled), ts: now() });
+    if (message.type === "stream") {
+      forwardClientCommand(ws, message, {
+        type: "stream",
+        enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
 
-    } else if (msg.type === "talk_audio") {
-      fwdAudio(ws, msg, {
+    if (message.type === "talk_audio") {
+      const clientSentAt = Number(message.sentAt) || now();
+      if (now() - clientSentAt > config.talkAudioMaxAgeMs) {
+        sendJson(ws, { type: "command_drop", commandType: "talk_audio", reason: "stale_talk_audio", ageMs: now() - clientSentAt });
+        return;
+      }
+      forwardClientAudio(ws, message, {
         type: "talk_audio",
-        codec:      String(msg.codec||"adpcm_ima"),
-        sampleRate: clamp(Number(msg.sampleRate)||16000, 8000, 24000),
-        samples:    clamp(Number(msg.samples)||0, 1, 1024),
-        seq:        Number(msg.seq)||0,
-        payload:    String(msg.payload||""),
-        ts: now()
+        codec: String(message.codec || "adpcm_ima"),
+        sampleRate: clamp(Number(message.sampleRate) || 16000, 8000, 24000),
+        samples: clamp(Number(message.samples) || 0, 1, 1024),
+        seq: Number(message.seq) || 0,
+        payload: String(message.payload || ""),
+        sentAt: clientSentAt,
+        relayedAt: now()
       });
+      return;
+    }
 
-    } else if (msg.type === "snapshot") {
-      fwdCmd(ws, msg, { type: "snapshot", ts: now() });
+    if (message.type === "snapshot") {
+      forwardClientCommand(ws, message, {
+        type: "snapshot",
+        sentAt: now()
+      });
     }
   });
 
   ws.on("close", () => {
     clients.delete(clientId);
-    notifyClientState();
-    console.log(`[client:${clientId}] disconnected`);
   });
-
-  ws.on("error", e => console.warn(`[client:${clientId}] ws error: ${e.message}`));
 });
 
-// ─── 주기 작업: stale 정리 + 브로커 상태 브로드캐스트 ───
 setInterval(() => {
-  pruneStale();
-  broadcastToClients({ type: "broker_status", ts: now(), devices: [...devices.keys()], clients: clients.size });
+  closeStaleConnections();
+  broadcastToClients({
+    type: "broker_status",
+    ts: now(),
+    devices: [...devices.keys()],
+    clients: clients.size
+  });
 }, config.heartbeatMs);
 
-// ─── 서버 시작 ───
 server.listen(config.port, config.host, () => {
-  console.log(`broker listening on http://${config.host}:${config.port}`);
-  console.log(`device  ws: ${config.devicePath}`);
-  console.log(`client  ws: ${config.clientPath}`);
+  console.log(`broker listening on ${protocol}://${config.host}:${config.port}`);
+  console.log(`device ws path: ${config.devicePath}`);
+  console.log(`client ws path: ${config.clientPath}`);
 });
