@@ -424,6 +424,14 @@ clientWss.on("connection", (ws) => {
       return;
     }
 
+    if (message.type === "sfx") {
+      forwardClientCommand(ws, message, {
+        type: "sfx",
+        sentAt: now()
+      });
+      return;
+    }
+
     if (message.type === "stream") {
       forwardClientCommand(ws, message, {
         type: "stream",

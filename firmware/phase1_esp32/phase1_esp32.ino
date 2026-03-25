@@ -38,7 +38,7 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
 constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
 constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
-constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 220;
+constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 150;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
 constexpr uint8_t MAX_PING_FAILS = 3;
@@ -83,6 +83,7 @@ bool localAudioWsStarted = false;
 bool cameraCaptureTaskStarted = false;
 bool mediaInitialized = false;
 bool streamEnabled = false;
+bool effectSequencePlaying = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
@@ -132,6 +133,7 @@ constexpr uint8_t SERVO_PWM_RES_BITS = 16;
 constexpr int STEERING_MIN_US = 1100;
 constexpr int STEERING_CENTER_US = 1500;
 constexpr int STEERING_MAX_US = 1900;
+constexpr int STEERING_TRIM_DEG = 12;
 constexpr char PREF_NAMESPACE[] = "rc-car";
 constexpr char PREF_WIFI_SSID[] = "wifi_ssid";
 constexpr char PREF_WIFI_PASS[] = "wifi_pass";
@@ -193,6 +195,7 @@ void saveConfig(const String& ssid, const String& password, const String& broker
 void loadRememberedWifi();
 void saveRememberedWifi();
 void rememberWifiCredentials(const String& ssid, const String& password);
+void removeRememberedWifiCredentials(const String& ssid);
 String getRememberedPassword(const String& ssid);
 void setConnectOnBoot(bool enabled);
 void startProvisioningAp();
@@ -211,6 +214,11 @@ void handleWifiScan();
 void handleWifiConnect();
 void handleTalkAudio();
 void playSpeakerBootTone();
+void playSpeakerTone(uint16_t frequencyHz, uint16_t durationMs, int16_t amplitude = 2600);
+void playSpeakerRest(uint16_t durationMs);
+void playEffectSequence();
+void triggerEffectSequence();
+void effectSequenceTask(void* arg);
 void startCameraCaptureTask();
 void cameraCaptureTask(void* arg);
 bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen);
@@ -251,6 +259,100 @@ void playSpeakerBootTone() {
       static_cast<uint8_t>((sample >> 8) & 0xff)
     };
     speaker.write(frame, sizeof(frame));
+  }
+}
+
+void playSpeakerTone(uint16_t frequencyHz, uint16_t durationMs, int16_t amplitude) {
+  if (!speakerReady || frequencyHz == 0 || durationMs == 0) {
+    return;
+  }
+
+  uint32_t sampleCount = (AUDIO_PLAYBACK_SAMPLE_RATE * static_cast<uint32_t>(durationMs)) / 1000U;
+  if (sampleCount == 0) {
+    return;
+  }
+
+  uint32_t halfWaveSamples = AUDIO_PLAYBACK_SAMPLE_RATE / (static_cast<uint32_t>(frequencyHz) * 2U);
+  if (halfWaveSamples == 0) {
+    halfWaveSamples = 1;
+  }
+
+  int16_t sample = amplitude;
+  uint8_t frame[4];
+  for (uint32_t i = 0; i < sampleCount; ++i) {
+    if ((i % halfWaveSamples) == 0) {
+      sample = static_cast<int16_t>(-sample);
+    }
+    frame[0] = static_cast<uint8_t>(sample & 0xff);
+    frame[1] = static_cast<uint8_t>((sample >> 8) & 0xff);
+    frame[2] = frame[0];
+    frame[3] = frame[1];
+    speaker.write(frame, sizeof(frame));
+  }
+}
+
+void playSpeakerRest(uint16_t durationMs) {
+  if (!speakerReady || durationMs == 0) {
+    return;
+  }
+
+  uint32_t sampleCount = (AUDIO_PLAYBACK_SAMPLE_RATE * static_cast<uint32_t>(durationMs)) / 1000U;
+  if (sampleCount == 0) {
+    return;
+  }
+
+  uint8_t frame[4] = {0, 0, 0, 0};
+  for (uint32_t i = 0; i < sampleCount; ++i) {
+    speaker.write(frame, sizeof(frame));
+  }
+}
+
+void playEffectSequence() {
+  if (!speakerReady) {
+    return;
+  }
+
+  playSpeakerTone(880, 120, 2400);
+  playSpeakerRest(40);
+  playSpeakerTone(1180, 120, 2400);
+  playSpeakerRest(80);
+
+  for (uint16_t freq = 520; freq <= 760; freq += 30) {
+    playSpeakerTone(freq, 45, 3000);
+  }
+  playSpeakerRest(70);
+
+  for (uint8_t i = 0; i < 2; ++i) {
+    playSpeakerTone(660, 180, 2800);
+    playSpeakerRest(30);
+    playSpeakerTone(520, 180, 2800);
+    playSpeakerRest(60);
+  }
+}
+
+void effectSequenceTask(void* arg) {
+  playEffectSequence();
+  effectSequencePlaying = false;
+  vTaskDelete(nullptr);
+}
+
+void triggerEffectSequence() {
+  if (!speakerReady) {
+    Serial.println("[SFX] ignored because speaker is not ready");
+    return;
+  }
+  if (effectSequencePlaying) {
+    Serial.println("[SFX] sequence already playing");
+    return;
+  }
+
+  effectSequencePlaying = true;
+  BaseType_t created = xTaskCreate(effectSequenceTask, "sfx_seq", 4096, nullptr, 1, nullptr);
+  if (created != pdPASS) {
+    effectSequencePlaying = false;
+    Serial.println("[SFX] failed to start task");
+  } else {
+    Serial.println("[SFX] sequence triggered");
   }
 }
 
@@ -389,6 +491,37 @@ void rememberWifiCredentials(const String& ssid, const String& password) {
     }
     rememberedSsids[0] = ssid;
     rememberedPasswords[0] = nextPassword;
+  }
+
+  saveRememberedWifi();
+}
+
+void removeRememberedWifiCredentials(const String& ssid) {
+  if (ssid.length() == 0 || rememberedWifiCount == 0) {
+    return;
+  }
+
+  int existingIndex = -1;
+  for (uint8_t i = 0; i < rememberedWifiCount; ++i) {
+    if (rememberedSsids[i] == ssid) {
+      existingIndex = i;
+      break;
+    }
+  }
+
+  if (existingIndex < 0) {
+    return;
+  }
+
+  for (int i = existingIndex; i < static_cast<int>(rememberedWifiCount) - 1; ++i) {
+    rememberedSsids[i] = rememberedSsids[i + 1];
+    rememberedPasswords[i] = rememberedPasswords[i + 1];
+  }
+
+  if (rememberedWifiCount > 0) {
+    rememberedWifiCount--;
+    rememberedSsids[rememberedWifiCount] = "";
+    rememberedPasswords[rememberedWifiCount] = "";
   }
 
   saveRememberedWifi();
@@ -553,7 +686,8 @@ void writeMotorOutput(int throttle) {
 }
 
 void writeSteeringOutput(int steering) {
-  int servoAngle = map(steering, -100, 100, 180, 35);
+  int servoAngle = map(steering, -100, 100, 35, 180);
+  servoAngle += STEERING_TRIM_DEG;
   servoAngle = constrain(servoAngle, 0, 180);
   steeringServo.write(servoAngle);
 }
@@ -573,7 +707,7 @@ void applyCameraQuality(const char* quality) {
   }
 
   framesize_t frameSize = FRAMESIZE_QVGA;
-  int jpegQuality = 14;
+  int jpegQuality = 12;
 
   if (strcmp(quality, "VGA") == 0) {
     frameSize = FRAMESIZE_VGA;
@@ -662,6 +796,8 @@ void configureWebSocket() {
             streamEnabled ? "enabled" : "disabled",
             cameraReady ? "ready" : "not_ready",
             static_cast<unsigned long>(latestFrameSequence));
+        } else if (strcmp(messageType, "sfx") == 0) {
+          triggerEffectSequence();
         } else if (strcmp(messageType, "talk_audio") == 0) {
           if (!talkEnabled) {
             droppedTalkAudioPackets++;
@@ -738,7 +874,7 @@ bool initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 14;
+  config.jpeg_quality = 12;
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
@@ -907,6 +1043,9 @@ void handleControlJson() {
   if (doc.containsKey("talk")) {
     talkEnabled = doc["talk"] | false;
     Serial.printf("[TALK] %s (AP mode)\n", talkEnabled ? "on" : "off");
+  }
+  if (doc.containsKey("sfx")) {
+    triggerEffectSequence();
   }
   if (doc.containsKey("stream")) {
     streamEnabled = doc["stream"] | false;
@@ -1179,6 +1318,7 @@ void handleWifiConnect() {
 
   String ssid     = String(doc["ssid"] | "");
   String password = String(doc["password"] | "");
+  const bool secure = doc["secure"] | true;
   ssid.trim();
   password.trim();
 
@@ -1187,8 +1327,11 @@ void handleWifiConnect() {
     return;
   }
 
-  // 비번이 비어있으면 저장된 것 사용
-  if (password.length() == 0) {
+  // 오픈 네트워크는 빈 비밀번호를 그대로 사용하고, 예전 저장 비밀번호도 지운다.
+  if (!secure) {
+    removeRememberedWifiCredentials(ssid);
+  } else if (password.length() == 0) {
+    // 보안 네트워크에서 비번이 비어있으면 저장된 것 사용
     String saved = getRememberedPassword(ssid);
     if (saved.length() > 0) {
       password = saved;

@@ -158,7 +158,7 @@
     background-size: 100% 50%, 50% 100%; background-position: center;
   }
   #joystick-ring {
-    width: 180px; height: 180px; border-radius: 50%;
+    width: 320px; height: 320px; border-radius: 50%;
     border: 1px solid rgba(255,255,255,0.18); position: absolute; z-index: 1;
     box-shadow: 0 0 0 30px rgba(255,255,255,0.02), 0 0 0 60px rgba(255,255,255,0.015);
   }
@@ -285,7 +285,7 @@
   <div id="stream-wrap">
     <img id="stream" src="" alt="stream" crossorigin="anonymous">
     <canvas id="stream-canvas"></canvas>
-    <div id="talk-overlay"><span>TALK MODE<br>VOICE TO CAR</span></div>
+    <div id="talk-overlay"><span>SFX PLAYBACK<br>RC CAR SPEAKER</span></div>
     <div id="hud">
       <div id="hud-left">
         <span>BAT : <span class="bat-val" id="bat-val">0%</span></span>
@@ -301,7 +301,7 @@
     <button class="tb-btn" id="btn-led" type="button">LED</button>
     <button class="tb-btn net-btn" id="btn-net" type="button">NET</button>
     <button class="tb-btn" id="btn-snap" type="button">SNAP</button>
-    <button class="tb-btn" id="btn-talk" type="button">TALK</button>
+    <button class="tb-btn" id="btn-talk" type="button">SFX</button>
     <button class="tb-btn rec-btn" id="btn-rec" type="button">REC</button>
   </div>
 
@@ -570,6 +570,18 @@ function sendMode(mode) {
   if (!apModeActive) {
     send({ type: "mode", deviceId, mode });
   }
+}
+
+function triggerSfx() {
+  if (apModeActive) {
+    apPost("/api/control", { sfx: true });
+    connLabel.textContent = "sfx trigger";
+  } else {
+    send({ type: "sfx", deviceId, sentAt: Date.now() });
+    connLabel.textContent = "sfx trigger";
+  }
+  setTalkUiActive(true);
+  window.setTimeout(() => setTalkUiActive(false), 900);
 }
 
 function send(payload) {
@@ -972,6 +984,7 @@ async function doSnap() {
 // WiFi 패널
 // ============================================================
 let selectedSsid = null;
+let selectedSsidSecure = true;
 let savedPasswords = {}; // {ssid: password} — ESP32에서 내려줌
 let scanResults = [];
 
@@ -1046,6 +1059,7 @@ function renderScanList() {
 
 function selectSsid(ssid, secure, hasSaved) {
   selectedSsid = ssid;
+  selectedSsidSecure = !!secure;
   // 기존 selected 해제
   document.querySelectorAll(".wifi-item").forEach(el => el.classList.remove("selected"));
   event.currentTarget.classList.add("selected");
@@ -1093,7 +1107,8 @@ async function doWifiConnect() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ssid: selectedSsid,
-        password: password
+        password: password,
+        secure: selectedSsidSecure
       })
     });
     const data = await res.json();
@@ -1619,15 +1634,7 @@ btnLed.addEventListener("click", () => { armAudioPlayback(); toggleLed(); });
 btnStream.addEventListener("click", () => { armAudioPlayback(); toggleStream(); });
 btnNet.addEventListener("click", () => { armAudioPlayback(); openWifiPanel(); });
 btnSnap.addEventListener("click", () => { armAudioPlayback(); doSnap(); });
-btnTalk.addEventListener("pointerdown", beginTalkPress);
-btnTalk.addEventListener("pointerup", (event) => {
-  if (talkPointerId === null || event.pointerId === talkPointerId) {
-    talkEnd();
-  }
-});
-btnTalk.addEventListener("pointercancel", talkEnd);
-btnTalk.addEventListener("pointerleave", talkEnd);
-btnTalk.addEventListener("lostpointercapture", talkEnd);
+btnTalk.addEventListener("click", () => { armAudioPlayback(); triggerSfx(); });
 btnTalk.addEventListener("contextmenu", (event) => event.preventDefault());
 btnRec.addEventListener("click", () => { armAudioPlayback(); toggleRec(); });
 streamEl.addEventListener("load", () => {
@@ -1649,7 +1656,7 @@ streamEl.addEventListener("error", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { talkEnd(); setStreamUrl(""); releaseWakeLock(); }
+  if (document.hidden) { setTalkUiActive(false); setStreamUrl(""); releaseWakeLock(); }
   else {
     requestWakeLock();
     if (!apModeActive && deviceId && brokerStreamRequested) {
@@ -1659,9 +1666,8 @@ document.addEventListener("visibilitychange", () => {
     }
   }
 });
-window.addEventListener("pointerup", talkEnd);
-window.addEventListener("blur", talkEnd);
-window.addEventListener("pagehide", () => { talkEnd(); setStreamUrl(""); releaseWakeLock(); });
+window.addEventListener("blur", () => { setTalkUiActive(false); });
+window.addEventListener("pagehide", () => { setTalkUiActive(false); setStreamUrl(""); releaseWakeLock(); });
 
 // ============================================================
 // 초기화
