@@ -19,6 +19,7 @@ module.exports = {
   clientPath: process.env.CLIENT_PATH || "/client",
   devicePath: process.env.DEVICE_PATH || "/device",
   publicWebDir: path.join(__dirname, "..", "..", "web"),
+  otaDir: path.join(__dirname, "..", "ota"),
   heartbeatMs: intFromEnv("HEARTBEAT_MS", 10000),
   ctrlMaxAgeMs: intFromEnv("CTRL_MAX_AGE_MS", 1000),
   talkAudioMaxAgeMs: intFromEnv("TALK_AUDIO_MAX_AGE_MS", 800),

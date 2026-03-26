@@ -1,5 +1,7 @@
 ﻿#include <Arduino.h>
 #include <ESP_I2S.h>
+#include <HTTPClient.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
@@ -41,11 +43,15 @@ constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
 constexpr unsigned long VIDEO_UPLOAD_INTERVAL_MS = 150;
 constexpr unsigned long AUDIO_UPLOAD_INTERVAL_MS = 40;
 constexpr unsigned long CAMERA_CAPTURE_INTERVAL_MS = 80;
+constexpr unsigned long OTA_STATUS_INTERVAL_MS = 500;
 constexpr uint8_t MAX_PING_FAILS = 3;
 constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_PLAYBACK_SAMPLE_RATE = 16000;
+constexpr char FIRMWARE_VERSION[] = "2026-03-26-ota1";
+constexpr char OTA_MANIFEST_PATH[] = "/ota/manifest.json";
+constexpr char OTA_DEFAULT_BIN_PATH[] = "/ota/phase1_esp32.bin";
 constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
 constexpr size_t AUDIO_STREAM_SAMPLES = 640;
 constexpr size_t AUDIO_CAPTURE_BYTES = AUDIO_CAPTURE_SAMPLES * sizeof(int16_t);
@@ -84,6 +90,7 @@ bool cameraCaptureTaskStarted = false;
 bool mediaInitialized = false;
 bool streamEnabled = false;
 bool effectSequencePlaying = false;
+bool otaInProgress = false;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
@@ -134,6 +141,9 @@ constexpr int STEERING_MIN_US = 1100;
 constexpr int STEERING_CENTER_US = 1500;
 constexpr int STEERING_MAX_US = 1900;
 constexpr int STEERING_TRIM_DEG = 12;
+constexpr int STEERING_LEFT_DEFAULT_DEG = 47;
+constexpr int STEERING_CENTER_DEFAULT_DEG = 119;
+constexpr int STEERING_RIGHT_DEFAULT_DEG = 180;
 constexpr char PREF_NAMESPACE[] = "rc-car";
 constexpr char PREF_WIFI_SSID[] = "wifi_ssid";
 constexpr char PREF_WIFI_PASS[] = "wifi_pass";
@@ -142,6 +152,9 @@ constexpr char PREF_BROKER_PORT[] = "broker_port";
 constexpr char PREF_DEVICE_ID[] = "device_id";
 constexpr char PREF_WIFI_MEMORY[] = "wifi_memory";
 constexpr char PREF_CONNECT_ONCE[] = "connect_once";
+constexpr char PREF_STEER_LEFT[] = "steer_left";
+constexpr char PREF_STEER_CENTER[] = "steer_center";
+constexpr char PREF_STEER_RIGHT[] = "steer_right";
 constexpr char AP_SSID[] = "RC-Car-Setup";
 constexpr char AP_PASSWORD[] = "12345678";
 constexpr char DEFAULT_DEVICE_ID[] = "rc-car-01";
@@ -157,6 +170,12 @@ String rememberedSsids[MAX_REMEMBERED_WIFI];
 String rememberedPasswords[MAX_REMEMBERED_WIFI];
 uint8_t rememberedWifiCount = 0;
 bool connectOnBoot = false;
+String otaStatusStage = "idle";
+String otaStatusMessage;
+String otaTargetVersion;
+int steeringLeftDeg = STEERING_LEFT_DEFAULT_DEG;
+int steeringCenterDeg = STEERING_CENTER_DEFAULT_DEG;
+int steeringRightDeg = STEERING_RIGHT_DEFAULT_DEG;
 
 int16_t audioCaptureBuffer[AUDIO_CAPTURE_SAMPLES] = {};
 uint8_t audioAdpcmBuffer[AUDIO_ADPCM_PAYLOAD_BYTES] = {};
@@ -198,6 +217,11 @@ void rememberWifiCredentials(const String& ssid, const String& password);
 void removeRememberedWifiCredentials(const String& ssid);
 String getRememberedPassword(const String& ssid);
 void setConnectOnBoot(bool enabled);
+void saveSteeringTrim();
+void loadSteeringTrim();
+void resetSteeringTrim();
+void applySteeringTrimBounds();
+void adjustSteeringTrim(const String& point, int delta);
 void startProvisioningAp();
 void startHttpServer();
 void ensureMediaInitialized();
@@ -219,6 +243,10 @@ void playSpeakerRest(uint16_t durationMs);
 void playEffectSequence();
 void triggerEffectSequence();
 void effectSequenceTask(void* arg);
+void triggerOtaUpdate();
+void otaUpdateTask(void* arg);
+void publishOtaStatus(const char* stage, const String& message = "", int progress = -1);
+String buildBrokerHttpUrl(const String& path);
 void startCameraCaptureTask();
 void cameraCaptureTask(void* arg);
 bool copyLatestJpegFrame(std::unique_ptr<uint8_t[]>& frameCopy, size_t& frameLen);
@@ -356,6 +384,262 @@ void triggerEffectSequence() {
   }
 }
 
+void publishOtaStatus(const char* stage, const String& message, int progress) {
+  otaStatusStage = stage ? stage : "";
+  otaStatusMessage = message;
+
+  if (wsConnected) {
+    StaticJsonDocument<256> doc;
+    doc["type"] = "ota_status";
+    doc["stage"] = otaStatusStage;
+    doc["message"] = otaStatusMessage;
+    doc["version"] = otaTargetVersion;
+    doc["currentVersion"] = FIRMWARE_VERSION;
+    doc["inProgress"] = otaInProgress;
+    if (progress >= 0) {
+      doc["progress"] = progress;
+    }
+    String payload;
+    serializeJson(doc, payload);
+    ws.sendTXT(payload);
+  }
+
+  Serial.printf("[OTA] %s %s\n", otaStatusStage.c_str(), otaStatusMessage.c_str());
+}
+
+String buildBrokerHttpUrl(const String& path) {
+  String normalized = path;
+  if (!normalized.startsWith("/")) {
+    normalized = "/" + normalized;
+  }
+  return String("http://") + activeBrokerHost + ":" + String(activeBrokerPort) + normalized;
+}
+
+void otaUpdateTask(void* arg) {
+  (void)arg;
+  otaInProgress = true;
+  otaTargetVersion = "";
+  streamEnabled = false;
+  talkEnabled = false;
+  safeStop();
+  publishOtaStatus("starting", "checking manifest", 0);
+
+  WiFiClient client;
+  HTTPClient http;
+  String manifestUrl = buildBrokerHttpUrl(OTA_MANIFEST_PATH);
+  http.setTimeout(15000);
+  if (!http.begin(client, manifestUrl)) {
+    publishOtaStatus("failed", "manifest begin failed");
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  int manifestCode = http.GET();
+  if (manifestCode != HTTP_CODE_OK) {
+    publishOtaStatus("failed", "manifest unavailable");
+    http.end();
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  StaticJsonDocument<512> manifest;
+  DeserializationError manifestError = deserializeJson(manifest, http.getString());
+  http.end();
+  if (manifestError) {
+    publishOtaStatus("failed", "manifest parse failed");
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  if (!(manifest["available"] | true)) {
+    publishOtaStatus("idle", "manifest says no update");
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  otaTargetVersion = String(manifest["version"] | "");
+  if (otaTargetVersion.length() == 0) {
+    otaTargetVersion = "unknown";
+  }
+  if (otaTargetVersion == FIRMWARE_VERSION) {
+    publishOtaStatus("idle", "already up to date");
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  String binPath = String(manifest["bin"] | OTA_DEFAULT_BIN_PATH);
+  String binUrl = String(manifest["url"] | "");
+  if (binUrl.length() == 0) {
+    if (binPath.startsWith("http://") || binPath.startsWith("https://")) {
+      binUrl = binPath;
+    } else {
+      binUrl = buildBrokerHttpUrl(binPath);
+    }
+  }
+
+  publishOtaStatus("downloading", String("fetching ") + otaTargetVersion, 1);
+  if (!http.begin(client, binUrl)) {
+    publishOtaStatus("failed", "binary begin failed");
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  int binCode = http.GET();
+  if (binCode != HTTP_CODE_OK) {
+    publishOtaStatus("failed", String("binary http ") + binCode);
+    http.end();
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  int contentLength = http.getSize();
+  if (!Update.begin(contentLength > 0 ? static_cast<size_t>(contentLength) : UPDATE_SIZE_UNKNOWN)) {
+    publishOtaStatus("failed", String("update begin error ") + Update.getError());
+    http.end();
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buffer[1024];
+  size_t writtenTotal = 0;
+  int lastProgress = -1;
+  unsigned long lastStatusSentAt = 0;
+  while (http.connected() && (contentLength < 0 || writtenTotal < static_cast<size_t>(contentLength))) {
+    size_t available = stream->available();
+    if (available == 0) {
+      delay(1);
+      continue;
+    }
+
+    size_t toRead = min(available, sizeof(buffer));
+    size_t readLen = stream->readBytes(buffer, toRead);
+    if (readLen == 0) {
+      continue;
+    }
+
+    size_t writeLen = Update.write(buffer, readLen);
+    if (writeLen != readLen) {
+      publishOtaStatus("failed", String("write error ") + Update.getError());
+      Update.abort();
+      http.end();
+      otaInProgress = false;
+      vTaskDelete(nullptr);
+      return;
+    }
+
+    writtenTotal += writeLen;
+    if (contentLength > 0) {
+      int progress = static_cast<int>((writtenTotal * 100U) / static_cast<size_t>(contentLength));
+      unsigned long now = millis();
+      if (progress != lastProgress && (progress == 100 || progress - lastProgress >= 5 || now - lastStatusSentAt >= OTA_STATUS_INTERVAL_MS)) {
+        lastProgress = progress;
+        lastStatusSentAt = now;
+        publishOtaStatus("downloading", String("writing ") + otaTargetVersion, progress);
+      }
+    }
+  }
+  http.end();
+
+  if (!Update.end()) {
+    publishOtaStatus("failed", String("finalize error ") + Update.getError());
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  if (!Update.isFinished()) {
+    publishOtaStatus("failed", "update incomplete");
+    otaInProgress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  publishOtaStatus("done", "update applied, restarting", 100);
+  delay(800);
+  ESP.restart();
+}
+
+void triggerOtaUpdate() {
+  if (otaInProgress) {
+    publishOtaStatus("busy", "update already running");
+    return;
+  }
+  if (apMode) {
+    publishOtaStatus("failed", "ota disabled in ap mode");
+    return;
+  }
+  if (!WiFi.isConnected()) {
+    publishOtaStatus("failed", "wifi not connected");
+    return;
+  }
+  if (activeBrokerHost.length() == 0 || activeBrokerPort == 0) {
+    publishOtaStatus("failed", "broker not configured");
+    return;
+  }
+
+  BaseType_t created = xTaskCreatePinnedToCore(otaUpdateTask, "ota_update", 10240, nullptr, 1, nullptr, 1);
+  if (created != pdPASS) {
+    publishOtaStatus("failed", "task start failed");
+  }
+}
+
+void applySteeringTrimBounds() {
+  steeringLeftDeg = constrain(steeringLeftDeg, 0, 180);
+  steeringCenterDeg = constrain(steeringCenterDeg, steeringLeftDeg, 180);
+  steeringRightDeg = constrain(steeringRightDeg, steeringCenterDeg, 180);
+}
+
+void saveSteeringTrim() {
+  applySteeringTrimBounds();
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putChar(PREF_STEER_LEFT, static_cast<int8_t>(steeringLeftDeg));
+  preferences.putChar(PREF_STEER_CENTER, static_cast<int8_t>(steeringCenterDeg));
+  preferences.putChar(PREF_STEER_RIGHT, static_cast<int8_t>(steeringRightDeg));
+  preferences.end();
+}
+
+void loadSteeringTrim() {
+  preferences.begin(PREF_NAMESPACE, true);
+  steeringLeftDeg = preferences.getChar(PREF_STEER_LEFT, static_cast<int8_t>(STEERING_LEFT_DEFAULT_DEG));
+  steeringCenterDeg = preferences.getChar(PREF_STEER_CENTER, static_cast<int8_t>(STEERING_CENTER_DEFAULT_DEG));
+  steeringRightDeg = preferences.getChar(PREF_STEER_RIGHT, static_cast<int8_t>(STEERING_RIGHT_DEFAULT_DEG));
+  preferences.end();
+  applySteeringTrimBounds();
+}
+
+void resetSteeringTrim() {
+  steeringLeftDeg = STEERING_LEFT_DEFAULT_DEG;
+  steeringCenterDeg = STEERING_CENTER_DEFAULT_DEG;
+  steeringRightDeg = STEERING_RIGHT_DEFAULT_DEG;
+  saveSteeringTrim();
+}
+
+void adjustSteeringTrim(const String& point, int delta) {
+  if (point == "left") {
+    steeringLeftDeg += delta;
+  } else if (point == "center") {
+    steeringCenterDeg += delta;
+  } else if (point == "right") {
+    steeringRightDeg += delta;
+  } else {
+    return;
+  }
+
+  applySteeringTrimBounds();
+  saveSteeringTrim();
+  writeSteeringOutput(lastSteering);
+  Serial.printf("[TRIM] left=%d center=%d right=%d\n", steeringLeftDeg, steeringCenterDeg, steeringRightDeg);
+}
+
 bool loadWifiCredentials() {
   preferences.begin(PREF_NAMESPACE, true);
   activeWifiSsid = preferences.getString(PREF_WIFI_SSID, "");
@@ -382,6 +666,8 @@ bool loadWifiCredentials() {
   if (activeDeviceId.length() == 0) {
     activeDeviceId = DEFAULT_DEVICE_ID;
   }
+
+  loadSteeringTrim();
 
   Serial.printf("[CFG] wifiSsidLen=%u wifiPassLen=%u brokerHost=%s brokerPort=%u deviceId=%s\n",
     static_cast<unsigned>(activeWifiSsid.length()),
@@ -620,6 +906,13 @@ void publishStatus() {
   doc["streamPort"] = 80;
   doc["streamPath"] = "/stream";
   doc["localIp"] = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  doc["firmwareVersion"] = FIRMWARE_VERSION;
+  doc["otaInProgress"] = otaInProgress;
+  doc["otaStage"] = otaStatusStage;
+  doc["otaVersion"] = otaTargetVersion;
+  doc["steeringTrimLeft"] = steeringLeftDeg;
+  doc["steeringTrimCenter"] = steeringCenterDeg;
+  doc["steeringTrimRight"] = steeringRightDeg;
 
   String payload;
   serializeJson(doc, payload);
@@ -686,8 +979,13 @@ void writeMotorOutput(int throttle) {
 }
 
 void writeSteeringOutput(int steering) {
-  int servoAngle = map(steering, -100, 100, 35, 180);
-  servoAngle += STEERING_TRIM_DEG;
+  applySteeringTrimBounds();
+  int servoAngle = steeringCenterDeg;
+  if (steering < 0) {
+    servoAngle = map(steering, -100, 0, steeringLeftDeg, steeringCenterDeg);
+  } else if (steering > 0) {
+    servoAngle = map(steering, 0, 100, steeringCenterDeg, steeringRightDeg);
+  }
   servoAngle = constrain(servoAngle, 0, 180);
   steeringServo.write(servoAngle);
 }
@@ -798,6 +1096,13 @@ void configureWebSocket() {
             static_cast<unsigned long>(latestFrameSequence));
         } else if (strcmp(messageType, "sfx") == 0) {
           triggerEffectSequence();
+        } else if (strcmp(messageType, "steering_trim") == 0) {
+          if (doc["reset"] | false) {
+            resetSteeringTrim();
+            writeSteeringOutput(lastSteering);
+          } else {
+            adjustSteeringTrim(String(doc["point"] | ""), static_cast<int>(doc["delta"] | 0));
+          }
         } else if (strcmp(messageType, "talk_audio") == 0) {
           if (!talkEnabled) {
             droppedTalkAudioPackets++;
@@ -831,6 +1136,8 @@ void configureWebSocket() {
           talkAudioSequence++;
         } else if (strcmp(messageType, "camera_quality") == 0) {
           applyCameraQuality(doc["quality"] | "QVGA");
+        } else if (strcmp(messageType, "ota_update") == 0) {
+          triggerOtaUpdate();
         } else if (strcmp(messageType, "snapshot") == 0) {
           Serial.println("[SNAP] requested");
         } else if (strcmp(messageType, "pong") == 0) {
@@ -1019,6 +1326,9 @@ void handleStatusJson() {
   doc["ledEnabled"] = ledEnabled;
   doc["throttle"] = lastThrottle;
   doc["steering"] = lastSteering;
+  doc["steeringTrimLeft"] = steeringLeftDeg;
+  doc["steeringTrimCenter"] = steeringCenterDeg;
+  doc["steeringTrimRight"] = steeringRightDeg;
   doc["wsConnected"] = wsConnected;
   String payload;
   serializeJson(doc, payload);
@@ -1039,6 +1349,13 @@ void handleControlJson() {
   }
   if (doc.containsKey("throttle") || doc.containsKey("steering")) {
     applyControl(doc["throttle"] | lastThrottle, doc["steering"] | lastSteering);
+  }
+  if (doc.containsKey("steeringTrimReset") && (doc["steeringTrimReset"] | false)) {
+    resetSteeringTrim();
+    writeSteeringOutput(lastSteering);
+  }
+  if (doc.containsKey("steeringTrimPoint")) {
+    adjustSteeringTrim(String(doc["steeringTrimPoint"] | ""), static_cast<int>(doc["steeringTrimDelta"] | 0));
   }
   if (doc.containsKey("talk")) {
     talkEnabled = doc["talk"] | false;
@@ -1349,7 +1666,7 @@ void handleWifiConnect() {
 
 
 void uploadVideoFrameIfNeeded() {
-  if (!cameraReady || !wsConnected || !streamEnabled || talkEnabled) {
+  if (!cameraReady || !wsConnected || !streamEnabled || talkEnabled || otaInProgress) {
     return;
   }
 
@@ -1520,7 +1837,7 @@ void playSpeakerSamples(const int16_t* samples, size_t sampleCount) {
 void uploadAudioChunkIfNeeded() {
   const bool hasLocalAudioClients = localAudioWsStarted && localAudioWs.connectedClients() > 0;
   const bool shouldSendBrokerAudio = wsConnected;
-  if (!microphoneReady || !streamEnabled || talkEnabled || (!shouldSendBrokerAudio && !hasLocalAudioClients)) {
+  if (!microphoneReady || !streamEnabled || talkEnabled || otaInProgress || (!shouldSendBrokerAudio && !hasLocalAudioClients)) {
     return;
   }
 

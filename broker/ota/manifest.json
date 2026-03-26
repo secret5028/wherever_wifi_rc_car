@@ -1,0 +1,6 @@
+{
+  "available": false,
+  "version": "unset",
+  "bin": "/ota/phase1_esp32.bin",
+  "notes": "Upload a built firmware binary to broker/ota/phase1_esp32.bin and update this manifest before using OTA."
+}

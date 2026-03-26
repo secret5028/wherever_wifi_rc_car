@@ -138,6 +138,64 @@
     color: rgba(255,255,255,0.35); letter-spacing: 2px;
     margin-bottom: 8px; font-family: "Orbitron", sans-serif;
   }
+  #trim-panel {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .trim-box {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 8px 6px;
+    text-align: center;
+  }
+  .trim-title {
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.5);
+    margin-bottom: 5px;
+  }
+  .trim-value {
+    font-size: 13px;
+    color: #fef08a;
+    margin-bottom: 6px;
+    font-family: "Orbitron", sans-serif;
+  }
+  .trim-actions {
+    display: flex;
+    gap: 5px;
+  }
+  .trim-btn {
+    flex: 1;
+    padding: 6px 0;
+    border: none;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.08);
+    color: var(--text);
+    font-family: "Orbitron", sans-serif;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .trim-btn:active { background: rgba(249,115,22,0.22); }
+  #trim-reset-row {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 8px;
+  }
+  #trim-reset-btn {
+    padding: 7px 12px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 999px;
+    background: transparent;
+    color: rgba(255,255,255,0.65);
+    font-family: "Orbitron", sans-serif;
+    font-size: 10px;
+    letter-spacing: 1px;
+    cursor: pointer;
+  }
+  #trim-reset-btn:active { border-color: var(--orange); color: var(--orange); }
   #joystick-outer {
     width: 100%; flex: 1 1 auto; min-height: 220px;
     background: #111122; border-radius: 12px;
@@ -302,11 +360,41 @@
     <button class="tb-btn net-btn" id="btn-net" type="button">NET</button>
     <button class="tb-btn" id="btn-snap" type="button">SNAP</button>
     <button class="tb-btn" id="btn-talk" type="button">SFX</button>
+    <button class="tb-btn" id="btn-ota" type="button">OTA</button>
     <button class="tb-btn rec-btn" id="btn-rec" type="button">REC</button>
   </div>
 
   <div id="control-panel">
     <div id="mode-label">조종 모드</div>
+    <div id="trim-panel">
+      <div class="trim-box">
+        <div class="trim-title">LEFT</div>
+        <div class="trim-value" id="trim-left-val">--</div>
+        <div class="trim-actions">
+          <button class="trim-btn" type="button" data-trim-point="left" data-trim-delta="-1">-</button>
+          <button class="trim-btn" type="button" data-trim-point="left" data-trim-delta="1">+</button>
+        </div>
+      </div>
+      <div class="trim-box">
+        <div class="trim-title">CENTER</div>
+        <div class="trim-value" id="trim-center-val">--</div>
+        <div class="trim-actions">
+          <button class="trim-btn" type="button" data-trim-point="center" data-trim-delta="-1">-</button>
+          <button class="trim-btn" type="button" data-trim-point="center" data-trim-delta="1">+</button>
+        </div>
+      </div>
+      <div class="trim-box">
+        <div class="trim-title">RIGHT</div>
+        <div class="trim-value" id="trim-right-val">--</div>
+        <div class="trim-actions">
+          <button class="trim-btn" type="button" data-trim-point="right" data-trim-delta="-1">-</button>
+          <button class="trim-btn" type="button" data-trim-point="right" data-trim-delta="1">+</button>
+        </div>
+      </div>
+    </div>
+    <div id="trim-reset-row">
+      <button id="trim-reset-btn" type="button">TRIM RESET</button>
+    </div>
     <div id="joystick-outer">
       <div id="joystick-ring"></div>
       <div id="joystick-knob"></div>
@@ -393,6 +481,10 @@ let brokerVideoLoopActive = false;
 let brokerLastFrameAt = 0;
 let brokerTalkActive = false;
 let lastTalkError = "";
+let brokerOtaRequested = false;
+let brokerOtaInProgress = false;
+let brokerFirmwareVersion = "";
+const steeringTrim = { left: null, center: null, right: null };
 
 // AP모드 상태 표시
 const apBanner = document.getElementById("ap-banner");
@@ -412,7 +504,12 @@ const btnLed = document.getElementById("btn-led");
 const btnNet = document.getElementById("btn-net");
 const btnSnap = document.getElementById("btn-snap");
 const btnTalk = document.getElementById("btn-talk");
+const btnOta = document.getElementById("btn-ota");
 const btnRec = document.getElementById("btn-rec");
+const trimLeftVal = document.getElementById("trim-left-val");
+const trimCenterVal = document.getElementById("trim-center-val");
+const trimRightVal = document.getElementById("trim-right-val");
+const trimResetBtn = document.getElementById("trim-reset-btn");
 const knob = document.getElementById("joystick-knob");
 const outerEl = document.getElementById("joystick-outer");
 const snapshotCanvas = document.getElementById("snapshot-canvas");
@@ -452,6 +549,7 @@ function startApStatusPoll() {
     connLabel.textContent = `AP ${s.ip}`;
     if (typeof s.batteryPct === "number") batVal.textContent = `${s.batteryPct}%`;
     if (typeof s.rssi === "number") rssiVal.textContent = `${signalPercentFromRssi(s.rssi)}%`;
+    applySteeringTrimStatus(s);
   }, 1500);
 }
 
@@ -549,6 +647,35 @@ function updateStreamButton() {
   }
 }
 
+function updateOtaButton() {
+  if (apModeActive) {
+    btnOta.style.display = "none";
+    return;
+  }
+
+  btnOta.style.display = "";
+  btnOta.disabled = !brokerDeviceOnline || !wsReady || brokerOtaInProgress || brokerOtaRequested;
+  setButtonState(btnOta, brokerOtaInProgress || brokerOtaRequested);
+
+  if (brokerOtaInProgress) {
+    btnOta.textContent = "UPD";
+  } else if (brokerOtaRequested) {
+    btnOta.textContent = "WAIT";
+  } else {
+    btnOta.textContent = "OTA";
+  }
+}
+
+function applySteeringTrimStatus(source) {
+  if (!source) return;
+  if (typeof source.steeringTrimLeft === "number") steeringTrim.left = source.steeringTrimLeft;
+  if (typeof source.steeringTrimCenter === "number") steeringTrim.center = source.steeringTrimCenter;
+  if (typeof source.steeringTrimRight === "number") steeringTrim.right = source.steeringTrimRight;
+  trimLeftVal.textContent = steeringTrim.left ?? "--";
+  trimCenterVal.textContent = steeringTrim.center ?? "--";
+  trimRightVal.textContent = steeringTrim.right ?? "--";
+}
+
 // 공통 컨트롤 함수 - AP/broker 자동 분기
 function sendCtrl(throttle, steering) {
   if (apModeActive) {
@@ -572,6 +699,30 @@ function sendMode(mode) {
   }
 }
 
+function sendSteeringTrim(point, delta) {
+  if (apModeActive) {
+    apPost("/api/control", { steeringTrimPoint: point, steeringTrimDelta: delta });
+  } else {
+    send({ type: "steering_trim", deviceId, point, delta, sentAt: Date.now() });
+  }
+  if (point in steeringTrim && typeof steeringTrim[point] === "number") {
+    steeringTrim[point] += delta;
+    applySteeringTrimStatus({
+      steeringTrimLeft: steeringTrim.left,
+      steeringTrimCenter: steeringTrim.center,
+      steeringTrimRight: steeringTrim.right
+    });
+  }
+}
+
+function resetSteeringTrim() {
+  if (apModeActive) {
+    apPost("/api/control", { steeringTrimReset: true });
+  } else {
+    send({ type: "steering_trim", deviceId, reset: true, sentAt: Date.now() });
+  }
+}
+
 function triggerSfx() {
   if (apModeActive) {
     apPost("/api/control", { sfx: true });
@@ -582,6 +733,25 @@ function triggerSfx() {
   }
   setTalkUiActive(true);
   window.setTimeout(() => setTalkUiActive(false), 900);
+}
+
+async function triggerOtaUpdate() {
+  if (apModeActive || !wsReady || !brokerDeviceOnline || brokerOtaInProgress || brokerOtaRequested) return;
+  const versionLabel = brokerFirmwareVersion ? `\n현재 장치 버전: ${brokerFirmwareVersion}` : "";
+  const confirmed = window.confirm(`ESP32에 OTA 업데이트를 시작합니다.${versionLabel}\n브로커의 /ota/manifest.json 기준으로 설치합니다.`);
+  if (!confirmed) return;
+
+  brokerOtaRequested = true;
+  updateOtaButton();
+  connLabel.textContent = "ota requested";
+
+  const ok = await sendBrokerCommandWithAck("ota_update", { type: "ota_update", deviceId, sentAt: Date.now() }, 1800);
+  if (!ok) {
+    brokerOtaRequested = false;
+    brokerOtaInProgress = false;
+    updateOtaButton();
+    connLabel.textContent = "ota request failed";
+  }
 }
 
 function send(payload) {
@@ -744,6 +914,7 @@ function connectWS() {
     wsReady = true;
     connLabel.textContent = "broker on";
     updateStreamButton();
+    updateOtaButton();
   };
   ws.onclose = () => {
     wsReady = false;
@@ -755,6 +926,8 @@ function connectWS() {
     brokerStreamActive = false;
     brokerStreamRequested = false;
     brokerTalkActive = false;
+    brokerOtaRequested = false;
+    brokerOtaInProgress = false;
     talkTransition = null;
     setTalkUiActive(false);
     for (const commandType of [...pendingCommandAcks.keys()]) {
@@ -764,11 +937,13 @@ function connectWS() {
     connLabel.textContent = "reconnecting";
     setStreamUrl("");
     updateStreamButton();
+    updateOtaButton();
     setTimeout(connectWS, 1500);
   };
   ws.onerror = () => {
     connLabel.textContent = "socket error";
     updateStreamButton();
+    updateOtaButton();
   };
   ws.onmessage = (event) => {
     try { handleBrokerMessage(JSON.parse(event.data)); } catch { connLabel.textContent = "bad packet"; }
@@ -792,12 +967,14 @@ function handleBrokerMessage(message) {
       connLabel.textContent = "connected";
     }
     updateStreamButton();
+    updateOtaButton();
     return;
   }
   if (message.type === "device_online" && message.deviceId === deviceId) {
     brokerDeviceOnline = true;
     connLabel.textContent = "device ready";
     updateStreamButton();
+    updateOtaButton();
     return;
   }
   if (message.type === "device_offline" && message.deviceId === deviceId) {
@@ -805,16 +982,25 @@ function handleBrokerMessage(message) {
     brokerStreamActive = false;
     brokerStreamRequested = false;
     brokerTalkActive = false;
+    brokerOtaRequested = false;
+    brokerOtaInProgress = false;
     setTalkUiActive(false);
     connLabel.textContent = "device offline";
     setStreamUrl("");
     updateStreamButton();
+    updateOtaButton();
     return;
   }
   if (message.type === "status" && message.deviceId === deviceId) {
     brokerDeviceOnline = true;
     brokerStreamActive = Boolean(message.streamEnabled);
     brokerTalkActive = Boolean(message.talkEnabled);
+    brokerOtaInProgress = Boolean(message.otaInProgress);
+    brokerFirmwareVersion = String(message.firmwareVersion || brokerFirmwareVersion || "");
+    applySteeringTrimStatus(message);
+    if (!brokerOtaInProgress && message.otaStage !== "downloading" && message.otaStage !== "starting") {
+      brokerOtaRequested = false;
+    }
     if (typeof message.batteryPct === "number") batVal.textContent = `${message.batteryPct}%`;
     else if (typeof message.batteryMv === "number") batVal.textContent = `${(message.batteryMv/1000).toFixed(2)}V`;
     const sig = signalPercentFromRssi(message.rssi);
@@ -840,6 +1026,7 @@ function handleBrokerMessage(message) {
       brokerLastFrameAt = 0;
     }
     updateStreamButton();
+    updateOtaButton();
     return;
   }
   if (message.type === "command_ack" && message.deviceId === deviceId) {
@@ -853,6 +1040,20 @@ function handleBrokerMessage(message) {
   }
   if (message.type === "error") {
     connLabel.textContent = String(message.reason || "broker error");
+    return;
+  }
+  if (message.type === "ota_status" && message.deviceId === deviceId) {
+    brokerOtaRequested = false;
+    brokerOtaInProgress = Boolean(message.inProgress);
+    if (message.currentVersion) {
+      brokerFirmwareVersion = String(message.currentVersion);
+    }
+    const progressText = typeof message.progress === "number" ? ` ${message.progress}%` : "";
+    connLabel.textContent = `ota ${String(message.stage || "status")}${progressText}`;
+    if (!brokerOtaInProgress && (message.stage === "failed" || message.stage === "done" || message.stage === "idle")) {
+      brokerOtaRequested = false;
+    }
+    updateOtaButton();
     return;
   }
   if (message.type === "audio" && message.deviceId === deviceId) {
@@ -1635,8 +1836,19 @@ btnStream.addEventListener("click", () => { armAudioPlayback(); toggleStream(); 
 btnNet.addEventListener("click", () => { armAudioPlayback(); openWifiPanel(); });
 btnSnap.addEventListener("click", () => { armAudioPlayback(); doSnap(); });
 btnTalk.addEventListener("click", () => { armAudioPlayback(); triggerSfx(); });
+btnOta.addEventListener("click", () => { armAudioPlayback(); triggerOtaUpdate(); });
 btnTalk.addEventListener("contextmenu", (event) => event.preventDefault());
 btnRec.addEventListener("click", () => { armAudioPlayback(); toggleRec(); });
+document.querySelectorAll("[data-trim-point]").forEach((button) => {
+  button.addEventListener("click", () => {
+    armAudioPlayback();
+    sendSteeringTrim(button.dataset.trimPoint, Number(button.dataset.trimDelta || 0));
+  });
+});
+trimResetBtn.addEventListener("click", () => {
+  armAudioPlayback();
+  resetSteeringTrim();
+});
 streamEl.addEventListener("load", () => {
   if (apModeActive) return;
   if (brokerStreamRequested) {
@@ -1681,6 +1893,7 @@ if (isApOrLocal) {
   startApStatusPoll();
   startApAudioWs();
   updateStreamButton();
+  updateOtaButton();
 } else {
   // broker 모드
   apBanner.classList.remove("visible");
@@ -1689,6 +1902,7 @@ if (isApOrLocal) {
   streamEl.classList.add("feed-only");
   streamCanvas.classList.add("visible");
   updateStreamButton();
+  updateOtaButton();
   connectWS();
 }
 </script>

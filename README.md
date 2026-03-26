@@ -69,3 +69,32 @@ Optional broker dependency install:
 ```powershell
 .\scripts\bootstrap.ps1 -InstallBrokerDeps
 ```
+
+## Manual OTA
+
+Manual OTA now uses the existing broker VM as the firmware host.
+
+- Broker serves OTA artifacts from `broker/ota/`
+- ESP32 fetches `http://<broker-host>:<broker-port>/ota/manifest.json`
+- Remote browser UI sends an `OTA` command over the broker WebSocket
+
+Expected OTA files:
+
+- `broker/ota/manifest.json`
+- `broker/ota/phase1_esp32.bin`
+
+Minimal manifest example:
+
+```json
+{
+  "available": true,
+  "version": "2026-03-26-1",
+  "bin": "/ota/phase1_esp32.bin"
+}
+```
+
+Notes:
+
+- The current firmware builds OTA URLs from the configured broker host/port and uses plain HTTP.
+- OTA is disabled while the board is in AP mode.
+- During OTA, video/audio streaming is paused and the board restarts after a successful flash.

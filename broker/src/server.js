@@ -30,6 +30,16 @@ function readStaticFile(filePath) {
   }
 }
 
+function getContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".html") return "text/html; charset=utf-8";
+  if (ext === ".js") return "application/javascript; charset=utf-8";
+  if (ext === ".json") return "application/json; charset=utf-8";
+  if (ext === ".bin") return "application/octet-stream";
+  if (ext === ".txt") return "text/plain; charset=utf-8";
+  return "application/octet-stream";
+}
+
 function getVideoDeviceId(reqUrl) {
   const parsed = new URL(reqUrl, "http://localhost");
   const match = parsed.pathname.match(/^\/video\/([^/]+)$/);
@@ -89,10 +99,10 @@ function broadcastFrame(deviceEntry, frameBuffer) {
   }
 }
 
-function serveStatic(req, res) {
-  const urlPath = req.url === "/" ? "/index.html" : req.url;
-  const safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(config.publicWebDir, safePath);
+function serveFromDir(req, res, rootDir, requestPath, defaultFile = null) {
+  const normalizedPath = requestPath === "/" && defaultFile ? `/${defaultFile}` : requestPath;
+  const safePath = path.normalize(normalizedPath).replace(/^(\.\.[/\\])+/, "");
+  const filePath = path.join(rootDir, safePath);
   const content = readStaticFile(filePath);
 
   if (!content) {
@@ -101,21 +111,23 @@ function serveStatic(req, res) {
     return;
   }
 
-  const ext = path.extname(filePath);
-  const contentType =
-    ext === ".html"
-      ? "text/html; charset=utf-8"
-      : ext === ".js"
-        ? "application/javascript; charset=utf-8"
-        : "text/plain; charset=utf-8";
-
   res.writeHead(200, {
-    "content-type": contentType,
+    "content-type": getContentType(filePath),
     "Cache-Control": "no-cache, no-store, must-revalidate",
     Pragma: "no-cache",
     Expires: "0"
   });
   res.end(content);
+}
+
+function serveStatic(req, res) {
+  const requestUrl = new URL(req.url, "http://localhost");
+  serveFromDir(req, res, config.publicWebDir, requestUrl.pathname, "index.html");
+}
+
+function serveOta(req, res) {
+  const requestUrl = new URL(req.url, "http://localhost");
+  serveFromDir(req, res, config.otaDir, requestUrl.pathname.replace(/^\/ota/, "") || "/", "manifest.json");
 }
 
 function createHttpHandler(req, res) {
@@ -129,6 +141,11 @@ function createHttpHandler(req, res) {
     }
 
     attachVideoClient(deviceEntry, res);
+    return;
+  }
+
+  if (req.url.startsWith("/ota")) {
+    serveOta(req, res);
     return;
   }
 
@@ -326,6 +343,14 @@ deviceWss.on("connection", (ws, req) => {
       return;
     }
 
+    if (message.type === "ota_status") {
+      broadcastToClients({
+        ...message,
+        deviceId
+      });
+      return;
+    }
+
     if (message.type === "log") {
       broadcastToClients({ type: "device_log", deviceId, message: message.message || "" });
     }
@@ -436,6 +461,25 @@ clientWss.on("connection", (ws) => {
       forwardClientCommand(ws, message, {
         type: "stream",
         enabled: Boolean(message.enabled),
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "steering_trim") {
+      forwardClientCommand(ws, message, {
+        type: "steering_trim",
+        point: String(message.point || ""),
+        delta: clamp(Number(message.delta) || 0, -20, 20),
+        reset: Boolean(message.reset),
+        sentAt: now()
+      });
+      return;
+    }
+
+    if (message.type === "ota_update") {
+      forwardClientCommand(ws, message, {
+        type: "ota_update",
         sentAt: now()
       });
       return;
