@@ -36,7 +36,7 @@ constexpr unsigned long WIFI_RETRY_MS = 5000;
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr unsigned long STATUS_INTERVAL_MS = 2000;
 constexpr unsigned long PING_INTERVAL_MS = 10000;
-constexpr unsigned long COMMAND_TIMEOUT_MS = 1000;
+constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
 constexpr unsigned long WS_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long RESTART_DELAY_MS = 3000;
 constexpr unsigned long AP_AUTO_REBOOT_MS = 2000;
@@ -49,7 +49,7 @@ constexpr uint8_t WIFI_FAILURES_BEFORE_AP = 3;
 constexpr uint32_t AUDIO_CAPTURE_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_STREAM_SAMPLE_RATE = 16000;
 constexpr uint32_t AUDIO_PLAYBACK_SAMPLE_RATE = 16000;
-constexpr char FIRMWARE_VERSION[] = "2026-03-26-ota1";
+constexpr char FIRMWARE_VERSION[] = "2026-03-28-ota5";
 constexpr char OTA_MANIFEST_PATH[] = "/ota/manifest.json";
 constexpr char OTA_DEFAULT_BIN_PATH[] = "/ota/phase1_esp32.bin";
 constexpr size_t AUDIO_CAPTURE_SAMPLES = 640;
@@ -91,6 +91,7 @@ bool mediaInitialized = false;
 bool streamEnabled = false;
 bool effectSequencePlaying = false;
 bool otaInProgress = false;
+uint8_t pendingEffectSequenceCount = 0;
 uint8_t pingFailCount = 0;
 uint8_t wifiFailureCount = 0;
 int lastThrottle = 0;
@@ -359,7 +360,17 @@ void playEffectSequence() {
 }
 
 void effectSequenceTask(void* arg) {
-  playEffectSequence();
+  while (true) {
+    playEffectSequence();
+
+    if (pendingEffectSequenceCount == 0) {
+      break;
+    }
+
+    pendingEffectSequenceCount--;
+    Serial.printf("[SFX] queued remaining=%u\n", static_cast<unsigned>(pendingEffectSequenceCount));
+  }
+
   effectSequencePlaying = false;
   vTaskDelete(nullptr);
 }
@@ -370,10 +381,16 @@ void triggerEffectSequence() {
     return;
   }
   if (effectSequencePlaying) {
-    Serial.println("[SFX] sequence already playing");
+    if (pendingEffectSequenceCount < 8) {
+      pendingEffectSequenceCount++;
+      Serial.printf("[SFX] queued count=%u\n", static_cast<unsigned>(pendingEffectSequenceCount));
+    } else {
+      Serial.println("[SFX] queue full");
+    }
     return;
   }
 
+  pendingEffectSequenceCount = 0;
   effectSequencePlaying = true;
   BaseType_t created = xTaskCreate(effectSequenceTask, "sfx_seq", 4096, nullptr, 1, nullptr);
   if (created != pdPASS) {
@@ -424,11 +441,13 @@ void otaUpdateTask(void* arg) {
   safeStop();
   publishOtaStatus("starting", "checking manifest", 0);
 
-  WiFiClient client;
+  WiFiClient manifestClient;
   HTTPClient http;
   String manifestUrl = buildBrokerHttpUrl(OTA_MANIFEST_PATH);
+  http.useHTTP10(true);
+  http.setReuse(false);
   http.setTimeout(15000);
-  if (!http.begin(client, manifestUrl)) {
+  if (!http.begin(manifestClient, manifestUrl)) {
     publishOtaStatus("failed", "manifest begin failed");
     otaInProgress = false;
     vTaskDelete(nullptr);
@@ -483,7 +502,10 @@ void otaUpdateTask(void* arg) {
   }
 
   publishOtaStatus("downloading", String("fetching ") + otaTargetVersion, 1);
-  if (!http.begin(client, binUrl)) {
+  WiFiClient binClient;
+  http.useHTTP10(true);
+  http.setReuse(false);
+  if (!http.begin(binClient, binUrl)) {
     publishOtaStatus("failed", "binary begin failed");
     otaInProgress = false;
     vTaskDelete(nullptr);
@@ -500,6 +522,7 @@ void otaUpdateTask(void* arg) {
   }
 
   int contentLength = http.getSize();
+  Update.setCryptMode(U_AES_DECRYPT_NONE);
   if (!Update.begin(contentLength > 0 ? static_cast<size_t>(contentLength) : UPDATE_SIZE_UNKNOWN)) {
     publishOtaStatus("failed", String("update begin error ") + Update.getError());
     http.end();
@@ -594,24 +617,24 @@ void triggerOtaUpdate() {
 
 void applySteeringTrimBounds() {
   steeringLeftDeg = constrain(steeringLeftDeg, 0, 180);
-  steeringCenterDeg = constrain(steeringCenterDeg, steeringLeftDeg, 180);
-  steeringRightDeg = constrain(steeringRightDeg, steeringCenterDeg, 180);
+  steeringCenterDeg = constrain(steeringCenterDeg, 0, 180);
+  steeringRightDeg = constrain(steeringRightDeg, 0, 180);
 }
 
 void saveSteeringTrim() {
   applySteeringTrimBounds();
   preferences.begin(PREF_NAMESPACE, false);
-  preferences.putChar(PREF_STEER_LEFT, static_cast<int8_t>(steeringLeftDeg));
-  preferences.putChar(PREF_STEER_CENTER, static_cast<int8_t>(steeringCenterDeg));
-  preferences.putChar(PREF_STEER_RIGHT, static_cast<int8_t>(steeringRightDeg));
+  preferences.putUChar(PREF_STEER_LEFT, static_cast<uint8_t>(steeringLeftDeg));
+  preferences.putUChar(PREF_STEER_CENTER, static_cast<uint8_t>(steeringCenterDeg));
+  preferences.putUChar(PREF_STEER_RIGHT, static_cast<uint8_t>(steeringRightDeg));
   preferences.end();
 }
 
 void loadSteeringTrim() {
   preferences.begin(PREF_NAMESPACE, true);
-  steeringLeftDeg = preferences.getChar(PREF_STEER_LEFT, static_cast<int8_t>(STEERING_LEFT_DEFAULT_DEG));
-  steeringCenterDeg = preferences.getChar(PREF_STEER_CENTER, static_cast<int8_t>(STEERING_CENTER_DEFAULT_DEG));
-  steeringRightDeg = preferences.getChar(PREF_STEER_RIGHT, static_cast<int8_t>(STEERING_RIGHT_DEFAULT_DEG));
+  steeringLeftDeg = static_cast<int>(preferences.getUChar(PREF_STEER_LEFT, static_cast<uint8_t>(STEERING_LEFT_DEFAULT_DEG)));
+  steeringCenterDeg = static_cast<int>(preferences.getUChar(PREF_STEER_CENTER, static_cast<uint8_t>(STEERING_CENTER_DEFAULT_DEG)));
+  steeringRightDeg = static_cast<int>(preferences.getUChar(PREF_STEER_RIGHT, static_cast<uint8_t>(STEERING_RIGHT_DEFAULT_DEG)));
   preferences.end();
   applySteeringTrimBounds();
 }
@@ -1209,7 +1232,7 @@ bool initCamera() {
     sensor->set_brightness(sensor, 0);
     sensor->set_saturation(sensor, 0);
     sensor->set_hmirror(sensor, 0);
-    sensor->set_vflip(sensor, 1);
+    sensor->set_vflip(sensor, 0);
   }
 
   Serial.println("[CAM] ready");

@@ -1,6 +1,6 @@
 {
-  "available": false,
-  "version": "unset",
+  "available": true,
+  "version": "2026-03-28-ota5",
   "bin": "/ota/phase1_esp32.bin",
-  "notes": "Upload a built firmware binary to broker/ota/phase1_esp32.bin and update this manifest before using OTA."
+  "notes": "Camera vertical flip removed, command stop timeout tightened, OTA plain-bin handling updated, HTTP OTA requests use isolated non-reused connections."
 }

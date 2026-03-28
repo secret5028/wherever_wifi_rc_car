@@ -141,58 +141,55 @@
   #trim-panel {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
-    margin-bottom: 8px;
+    gap: 5px;
+    margin-bottom: 6px;
   }
   .trim-box {
     background: rgba(255,255,255,0.05);
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 10px;
-    padding: 8px 6px;
+    padding: 6px 5px;
     text-align: center;
   }
-  .trim-title {
-    font-size: 9px;
-    letter-spacing: 1px;
-    color: rgba(255,255,255,0.5);
-    margin-bottom: 5px;
-  }
   .trim-value {
-    font-size: 13px;
+    font-size: 12px;
     color: #fef08a;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
     font-family: "Orbitron", sans-serif;
+    line-height: 1;
   }
   .trim-actions {
     display: flex;
-    gap: 5px;
+    gap: 4px;
   }
   .trim-btn {
     flex: 1;
-    padding: 6px 0;
+    padding: 4px 0;
     border: none;
-    border-radius: 8px;
+    border-radius: 7px;
     background: rgba(255,255,255,0.08);
     color: var(--text);
     font-family: "Orbitron", sans-serif;
     font-size: 11px;
+    line-height: 1.1;
     cursor: pointer;
   }
   .trim-btn:active { background: rgba(249,115,22,0.22); }
   #trim-reset-row {
     display: flex;
     justify-content: center;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
   }
   #trim-reset-btn {
-    padding: 7px 12px;
+    padding: 5px 10px;
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 999px;
     background: transparent;
     color: rgba(255,255,255,0.65);
     font-family: "Orbitron", sans-serif;
-    font-size: 10px;
+    font-size: 9px;
     letter-spacing: 1px;
+    line-height: 1.1;
     cursor: pointer;
   }
   #trim-reset-btn:active { border-color: var(--orange); color: var(--orange); }
@@ -368,7 +365,6 @@
     <div id="mode-label">조종 모드</div>
     <div id="trim-panel">
       <div class="trim-box">
-        <div class="trim-title">LEFT</div>
         <div class="trim-value" id="trim-left-val">--</div>
         <div class="trim-actions">
           <button class="trim-btn" type="button" data-trim-point="left" data-trim-delta="-1">-</button>
@@ -376,7 +372,6 @@
         </div>
       </div>
       <div class="trim-box">
-        <div class="trim-title">CENTER</div>
         <div class="trim-value" id="trim-center-val">--</div>
         <div class="trim-actions">
           <button class="trim-btn" type="button" data-trim-point="center" data-trim-delta="-1">-</button>
@@ -384,7 +379,6 @@
         </div>
       </div>
       <div class="trim-box">
-        <div class="trim-title">RIGHT</div>
         <div class="trim-value" id="trim-right-val">--</div>
         <div class="trim-actions">
           <button class="trim-btn" type="button" data-trim-point="right" data-trim-delta="-1">-</button>
@@ -678,11 +672,18 @@ function applySteeringTrimStatus(source) {
 
 // 공통 컨트롤 함수 - AP/broker 자동 분기
 function sendCtrl(throttle, steering) {
+  lastThrottleSent = throttle;
+  lastSteeringSent = steering;
   if (apModeActive) {
     apPost("/api/control", { throttle, steering });
   } else {
     send({ type: "ctrl", deviceId, throttle, steering, sentAt: Date.now() });
   }
+}
+
+function sendEmergencyStop() {
+  if (lastThrottleSent === 0 && lastSteeringSent === 0) return;
+  sendCtrl(0, 0);
 }
 
 function sendLed(enabled) {
@@ -1777,6 +1778,8 @@ async function toggleRec() {
 // ============================================================
 let joystickActive = false, jCenterX = 0, jCenterY = 0, jMaxR = 0, lastSendTime = 0;
 const SEND_INTERVAL = 30;
+let lastThrottleSent = 0;
+let lastSteeringSent = 0;
 
 function getJoystickBounds() {
   const r = outerEl.getBoundingClientRect();
@@ -1868,7 +1871,7 @@ streamEl.addEventListener("error", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { setTalkUiActive(false); setStreamUrl(""); releaseWakeLock(); }
+  if (document.hidden) { sendEmergencyStop(); setTalkUiActive(false); setStreamUrl(""); releaseWakeLock(); }
   else {
     requestWakeLock();
     if (!apModeActive && deviceId && brokerStreamRequested) {
@@ -1878,8 +1881,9 @@ document.addEventListener("visibilitychange", () => {
     }
   }
 });
-window.addEventListener("blur", () => { setTalkUiActive(false); });
-window.addEventListener("pagehide", () => { setTalkUiActive(false); setStreamUrl(""); releaseWakeLock(); });
+window.addEventListener("blur", () => { sendEmergencyStop(); setTalkUiActive(false); });
+window.addEventListener("pagehide", () => { sendEmergencyStop(); setTalkUiActive(false); setStreamUrl(""); releaseWakeLock(); });
+window.addEventListener("beforeunload", sendEmergencyStop);
 
 // ============================================================
 // 초기화
